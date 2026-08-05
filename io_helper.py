@@ -1,14 +1,16 @@
 
 
 
-"""I/O helpers: config loading, NPZ / VTK export."""
+"""I/O helpers: config loading, NPZ / XDMF (and legacy VTK) export."""
 
 from __future__ import annotations
 
 import re
 from pathlib import Path
 from typing import Any, Dict, Optional
+from xml.sax.saxutils import escape
 
+import h5py
 import numpy as np
 import yaml
 
@@ -74,6 +76,96 @@ def save_snapshot(
         for k, v in meta.items():
             payload[f"meta_{k}"] = np.asarray(v)
     np.savez_compressed(path, **payload)
+    return path
+
+
+def write_membrane_xdmf(
+    path: str | Path,
+    nodes: np.ndarray,
+    elements: np.ndarray,
+    point_data: Optional[Dict[str, np.ndarray]] = None,
+) -> Path:
+    """Write membrane surface as XDMF + HDF5 (``.xdmf`` + ``.h5``).
+
+    Open the ``.xdmf`` file in ParaView / VisIt. Geometry and connectivity
+    live in a sibling ``.h5`` file next to the XML sidecar.
+    """
+    path = Path(path)
+    if path.suffix.lower() not in {".xdmf", ".xmf"}:
+        path = path.with_suffix(".xdmf")
+    ensure_dir(path.parent)
+
+    nodes = np.asarray(nodes, dtype=np.float64)
+    elements = np.asarray(elements, dtype=np.int32)
+    if nodes.ndim != 2 or nodes.shape[1] != 3:
+        raise ValueError(f"nodes must be (n, 3), got {nodes.shape}")
+    if elements.ndim != 2 or elements.shape[1] != 3:
+        raise ValueError(f"elements must be (m, 3) triangles, got {elements.shape}")
+
+    n_pts = nodes.shape[0]
+    n_cells = elements.shape[0]
+    h5_path = path.with_suffix(".h5")
+    h5_name = h5_path.name
+
+    with h5py.File(h5_path, "w") as h5:
+        h5.create_dataset("geometry", data=nodes)
+        h5.create_dataset("connectivity", data=elements)
+        if point_data:
+            grp = h5.create_group("point_data")
+            for name, arr in point_data.items():
+                grp.create_dataset(str(name), data=np.asarray(arr))
+
+    attrs: list[str] = []
+    if point_data:
+        for name, arr in point_data.items():
+            arr = np.asarray(arr)
+            key = str(name)
+            safe = escape(key)
+            if arr.ndim == 1:
+                if arr.shape[0] != n_pts:
+                    raise ValueError(
+                        f"point_data[{name!r}] length {arr.shape[0]} != n_pts {n_pts}"
+                    )
+                attrs.append(
+                    f"""      <Attribute Name="{safe}" AttributeType="Scalar" Center="Node">
+        <DataItem Format="HDF" DataType="Float" Precision="8" Dimensions="{n_pts}">
+          {h5_name}:/point_data/{key}
+        </DataItem>
+      </Attribute>"""
+                )
+            elif arr.ndim == 2 and arr.shape == (n_pts, 3):
+                attrs.append(
+                    f"""      <Attribute Name="{safe}" AttributeType="Vector" Center="Node">
+        <DataItem Format="HDF" DataType="Float" Precision="8" Dimensions="{n_pts} 3">
+          {h5_name}:/point_data/{key}
+        </DataItem>
+      </Attribute>"""
+                )
+            else:
+                raise ValueError(
+                    f"point_data[{name!r}] must be (n,) or (n, 3), got {arr.shape}"
+                )
+
+    attr_block = ("\n" + "\n".join(attrs) + "\n") if attrs else "\n"
+    xml = f"""<?xml version="1.0" ?>
+<!DOCTYPE Xdmf SYSTEM "Xdmf.dtd" []>
+<Xdmf Version="3.0">
+  <Domain>
+    <Grid Name="Membrane" GridType="Uniform">
+      <Topology TopologyType="Triangle" NumberOfElements="{n_cells}">
+        <DataItem Format="HDF" DataType="Int" Dimensions="{n_cells} 3">
+          {h5_name}:/connectivity
+        </DataItem>
+      </Topology>
+      <Geometry GeometryType="XYZ">
+        <DataItem Format="HDF" DataType="Float" Precision="8" Dimensions="{n_pts} 3">
+          {h5_name}:/geometry
+        </DataItem>
+      </Geometry>{attr_block}    </Grid>
+  </Domain>
+</Xdmf>
+"""
+    path.write_text(xml, encoding="utf-8")
     return path
 
 
