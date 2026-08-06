@@ -230,6 +230,158 @@ def save_gif(
     return out_path
 
 
+def render_deformation_frame(
+    nodes: np.ndarray,
+    elements: np.ndarray,
+    nodes0: np.ndarray,
+    time: float,
+    disp_max: float,
+    z_limits: tuple[float, float],
+    title: str = "Membrane deformation",
+):
+    """Render one 3D membrane frame coloured by displacement magnitude → PIL RGB."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib import cm
+    from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+    from PIL import Image
+
+    nodes = np.asarray(nodes, dtype=float)
+    nodes0 = np.asarray(nodes0, dtype=float)
+    elements = np.asarray(elements, dtype=int)
+    disp = nodes - nodes0
+    mag = np.linalg.norm(disp, axis=1)
+    face_mag = mag[elements].mean(axis=1)
+
+    fig = plt.figure(figsize=(7.0, 5.2), dpi=100)
+    ax = fig.add_subplot(111, projection="3d")
+    tris = nodes[elements]
+    vmax = max(float(disp_max), 1e-12)
+    norm = plt.Normalize(vmin=0.0, vmax=vmax)
+    colors = cm.cividis(norm(face_mag))
+    coll = Poly3DCollection(
+        tris, facecolors=colors, edgecolor="#333333", linewidths=0.15, alpha=0.95
+    )
+    ax.add_collection3d(coll)
+
+    pad = 0.05 * max(
+        float(nodes0[:, 0].max() - nodes0[:, 0].min()),
+        float(nodes0[:, 1].max() - nodes0[:, 1].min()),
+        1e-6,
+    )
+    ax.set_xlim(nodes0[:, 0].min() - pad, nodes0[:, 0].max() + pad)
+    ax.set_ylim(nodes0[:, 1].min() - pad, nodes0[:, 1].max() + pad)
+    ax.set_zlim(*z_limits)
+    xr = float(nodes0[:, 0].max() - nodes0[:, 0].min()) + 2.0 * pad
+    yr = float(nodes0[:, 1].max() - nodes0[:, 1].min()) + 2.0 * pad
+    zr = float(z_limits[1] - z_limits[0])
+    ax.set_box_aspect((xr, yr, max(zr, 0.45 * xr)))
+    ax.set_xlabel("x [m]")
+    ax.set_ylabel("y [m]")
+    ax.set_zlabel("z [m]")
+    ax.view_init(elev=22, azim=-60)
+    ax.set_title(f"{title}   t = {time:.3g}", fontsize=12, pad=8)
+    ax.text2D(
+        0.02,
+        0.95,
+        f"t = {time:.3g}\nmax|u| = {float(mag.max()):.3e} m",
+        transform=ax.transAxes,
+        fontsize=11,
+        fontweight="bold",
+        color="#0b2e3d",
+        bbox=dict(
+            boxstyle="round,pad=0.25",
+            facecolor="white",
+            alpha=0.85,
+            edgecolor="#1f7a6b",
+        ),
+    )
+    mappable = cm.ScalarMappable(norm=norm, cmap="cividis")
+    fig.colorbar(mappable, ax=ax, shrink=0.65, pad=0.08, label="|u| [m]")
+
+    fig.tight_layout()
+    fig.canvas.draw()
+    img = Image.frombuffer(
+        "RGBA",
+        fig.canvas.get_width_height(),
+        fig.canvas.buffer_rgba(),
+    ).convert("RGB")
+    plt.close(fig)
+    return img
+
+
+def save_deformation_gif(
+    nodes_over_time: Sequence[np.ndarray],
+    elements: np.ndarray,
+    nodes0: np.ndarray,
+    out_path: str | Path,
+    times: Optional[Sequence[float]] = None,
+    fps: int = 8,
+    amplify: float = 1.0,
+    title: str = "Membrane deformation",
+) -> Path:
+    """Build an animated GIF of membrane deformation from recorded node sets.
+
+    Parameters
+    ----------
+    nodes_over_time :
+        Sequence of ``(n_nodes, 3)`` arrays (one per frame).
+    elements :
+        Triangle connectivity ``(n_elements, 3)``.
+    nodes0 :
+        Reference / undeformed node coordinates.
+    amplify :
+        Visual scale factor applied to displacement only (geometry = nodes0 +
+        amplify * (nodes - nodes0)). Use ``1.0`` for physical motion.
+    """
+    if not nodes_over_time:
+        raise ValueError("nodes_over_time is empty — nothing to animate")
+
+    nodes0 = np.asarray(nodes0, dtype=float)
+    elements = np.asarray(elements, dtype=int)
+    n_frames = len(nodes_over_time)
+    if times is None:
+        times = list(range(n_frames))
+    if len(times) != n_frames:
+        raise ValueError("times and nodes_over_time must have the same length")
+
+    # Fixed colour / z scales across the whole GIF
+    disp_max = 0.0
+    z_vals: List[float] = [float(nodes0[:, 2].min()), float(nodes0[:, 2].max())]
+    amp = float(amplify)
+    shaped: List[np.ndarray] = []
+    for nodes in nodes_over_time:
+        nodes = np.asarray(nodes, dtype=float)
+        disp = nodes - nodes0
+        shaped_nodes = nodes0 + amp * disp
+        shaped.append(shaped_nodes)
+        disp_max = max(disp_max, float(np.linalg.norm(disp, axis=1).max()))
+        z_vals.append(float(shaped_nodes[:, 2].min()))
+        z_vals.append(float(shaped_nodes[:, 2].max()))
+
+    z_min, z_max = min(z_vals), max(z_vals)
+    z_pad = max(0.05 * max(z_max - z_min, disp_max, 1e-6), 1e-4)
+    z_limits = (z_min - z_pad, z_max + z_pad)
+    if disp_max <= 0.0:
+        disp_max = 1e-6
+
+    frames = [
+        render_deformation_frame(
+            nodes=shaped[i],
+            elements=elements,
+            nodes0=nodes0,
+            time=float(times[i]),
+            disp_max=disp_max * max(amp, 1.0),
+            z_limits=z_limits,
+            title=title,
+        )
+        for i in range(n_frames)
+    ]
+    return save_gif(frames, out_path, fps=fps)
+
+
 def plot_membrane_3d(
     nodes: np.ndarray,
     elements: np.ndarray,
