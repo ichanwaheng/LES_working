@@ -75,15 +75,15 @@ def element_areas_normals(
 
 
 def build_rectangular_membrane(
-    length:float = 2.0,
-    width: float = 1.5,
-    nx:int = 24,
-    ny: int = 24,
-    z0: float =0.0,
-    origin: Sequence[float] = (0.0, 0.0, 0.0),
-    fixed_edges: Sequence[str] = ("left", "right"),
-    thickness:float = 0.001,
-    density: float = 1200.0,
+    length: float,
+    width: float,
+    nx: int,
+    ny: int,
+    thickness: float,
+    density: float,
+    origin: Sequence[float],
+    fixed_edges: Sequence[str],
+    z0: float = 0.0,
 ) -> MembraneMesh:
     ox, oy, oz = origin
     xs = np. linspace(0.0, length, nx+1)
