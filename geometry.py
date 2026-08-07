@@ -75,16 +75,22 @@ def element_areas_normals(
 
 
 def build_rectangular_membrane(
-    length: float,
-    width: float,
-    nx: int,
-    ny: int,
-    thickness: float,
-    density: float,
-    origin: Sequence[float],
-    fixed_edges: Sequence[str],
+    length: float = 2.0,
+    width: float = 1.5,
+    nx: int = 24,
+    ny: int = 24,
     z0: float = 0.0,
+    origin: Sequence[float] = (0.0, 0.0, 0.0),
+    fixed_edges: Sequence[str] = ("left", "right", "bottom", "top"),
+    thickness: float = 0.001,
+    density: float = 1200.0,
 ) -> MembraneMesh:
+    """Build a flat rectangular triangular membrane mesh.
+
+    Geometric size / resolution / mass properties are defined here (defaults),
+    not read from YAML. Callers typically only override ``origin`` / ``z0`` to
+    place the membrane in the fluid domain.
+    """
     ox, oy, oz = origin
     xs = np. linspace(0.0, length, nx+1)
     ys = np. linspace( 0.0, width, ny+1)
