@@ -296,7 +296,7 @@ class FluidSolver:
         rhs = np.nan_to_num(rhs, nan=0.0, posinf=0.0, neginf=0.0)
         rhs -= rhs.mean()
         rhs[0] = 0.0
-        p_flat, info = cg(self._lap_cache, rhs, tol=1e-6, maxiter=400)   ### check this it is supposed to be rtol not tol, misspelled by mistake and cannot find other rtol 
+        p_flat, info = cg(self._lap_cache, rhs, rtol=1e-6, maxiter=400) 
         if info != 0 or not np.all(np.isfinite(p_flat)):
             p_flat = spsolve(self._lap_cache, rhs)
         p_corr = np.asarray(p_flat, dtype=float).reshape(self.grid.shape, order="C")
