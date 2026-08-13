@@ -47,6 +47,7 @@ from mesh_update import under_relax, update_immsersed_boundary
 from geometry import build_rectangular_membrane
 from materials import MembraneMaterial
 from prestress import initial_sag_shape
+from energy_minimize import minimize_potential_energy
 
 try:
     from .uwm import updated_weight_form_find
@@ -91,6 +92,9 @@ class QuasiStaticFSI:
             thickness = mcfg["thickness"],
             density = mcfg["density"],
         )
+        # Flat undeformed geometry = constitutive reference for Green–Lagrange strain
+        self.nodes_ref = self.mesh.nodes.copy()
+
         sag = float(qcfg.get("initial_sag", 0.03))
         self.mesh.nodes = initial_sag_shape(self.mesh, sag=sag)
 
@@ -102,17 +106,28 @@ class QuasiStaticFSI:
             thickness = float(mcfg["thickness"]),
             prestress = float(mcfg["prestress"]),
         )
+        self.material = material
         self.N_pre = float(material.N_pre)
+        # constitutive (default): PE min with stress/strain; uwm: legacy force-density
+        self.structure_solver = str(
+            qcfg.get("structure_solver", "constitutive")
+        ).lower()
+        self.last_strain = np.zeros((self.mesh.n_elements, 3))
+        self.last_stress = np.zeros((self.mesh.n_elements, 3))
 
-        ff = updated_weight_form_find(
+        ff = self._solve_structure(
             self.mesh.nodes,
-            self.mesh.elements,
-            self. mesh.fixed,
-            N_pre = self.N_pre,
-            f_ext = None,
-            support_nodes = self.x_bc,
-            max_weight_updates = int(qcfg.get("uwm_weight_updates", 20)),
-            tol = float(qcfg.get("uwm_tol", 1e-7)),
+            f_ext=None,
+            max_iters=int(
+                qcfg.get(
+                    "energy_iters",
+                    qcfg.get("uwm_weight_updates", 20),
+                )
+            ),
+            tol=float(qcfg.get("energy_tol", qcfg.get("uwm_tol", 1e-7))),
+            under_relaxation=float(
+                qcfg.get("energy_relaxation", qcfg.get("uwm_relaxation", 1.0))
+            ),
         )
         self.nodes = ff.nodes
         self.mesh.nodes = self.nodes.copy()
@@ -156,12 +171,65 @@ class QuasiStaticFSI:
         self.uwm_weight_updates = int(qcfg.get("uwm_weight_updates", 20))
         self.uwm_tol = float(qcfg.get("uwm_tol", 1e-7))
         self.uwm_relax = float(qcfg.get("uwm_relaxation", 1.0))
+        self.energy_iters = int(
+            qcfg.get("energy_iters", self.uwm_weight_updates)
+        )
+        self.energy_tol = float(qcfg.get("energy_tol", self.uwm_tol))
+        self.energy_relax = float(
+            qcfg.get("energy_relaxation", self.uwm_relax)
+        )
 
         self.history = QuasiStaticHistory()
         self._f_old: Optional[np.ndarray] = None
         self.iteration = 0
         self.time =0.0
         self.t_end = float(tcfg.get("t_end", self.max_iters * self.fluid_substeps * self.dt))
+
+    def _solve_structure(
+        self,
+        nodes: np.ndarray,
+        f_ext: Optional[np.ndarray],
+        max_iters: Optional[int] = None,
+        tol: Optional[float] = None,
+        under_relaxation: Optional[float] = None,
+    ):
+        """Solve membrane equilibrium: constitutive PE min (default) or UWM."""
+        if self.structure_solver == "uwm":
+            return updated_weight_form_find(
+                nodes,
+                self.mesh.elements,
+                self.mesh.fixed,
+                N_pre=self.N_pre,
+                f_ext=f_ext,
+                support_nodes=self.x_bc,
+                max_weight_updates=int(
+                    self.uwm_weight_updates if max_iters is None else max_iters
+                ),
+                tol=float(self.uwm_tol if tol is None else tol),
+                under_relaxation=float(
+                    self.uwm_relax if under_relaxation is None else under_relaxation
+                ),
+            )
+
+        result = minimize_potential_energy(
+            nodes,
+            self.mesh.elements,
+            self.mesh.fixed,
+            self.material,
+            nodes0=self.nodes_ref,
+            f_ext=f_ext,
+            support_nodes=self.x_bc,
+            max_iters=int(
+                self.energy_iters if max_iters is None else max_iters
+            ),
+            tol=float(self.energy_tol if tol is None else tol),
+            under_relaxation=float(
+                self.energy_relax if under_relaxation is None else under_relaxation
+            ),
+        )
+        self.last_strain = result.strain_elem
+        self.last_stress = result.stress_elem
+        return result
 
     def _compute_loads(self):
         if self.load_mode == "interpolated_field":
@@ -212,18 +280,11 @@ class QuasiStaticFSI:
         self._f_old = f_use.copy()
 
         net_fz = float(np.sum(f_use[:,2]))
-        uwm = updated_weight_form_find(
+        sol = self._solve_structure(
             self.nodes,
-            self.mesh.elements,
-            self.mesh.fixed,
-            N_pre = self.N_pre,
-            f_ext = f_use,
-            support_nodes = self.x_bc,
-            max_weight_updates = self.uwm_weight_updates,
-            tol = self.uwm_tol,
-            under_relaxation = self. uwm_relax,
+            f_ext=f_use,
         )
-        x_new = under_relax(uwm.nodes, x_prev,self.alpha_shape)
+        x_new = under_relax(sol.nodes, x_prev,self.alpha_shape)
         x_new[self.mesh.fixed] = self.x_bc[self.mesh.fixed]
 
         shape_res = float(
@@ -235,6 +296,11 @@ class QuasiStaticFSI:
         mean_uz = float(
             np. mean(self.nodes[~self.mesh.fixed,2] - self.x_bc[~self.mesh.fixed,2])
         )
+        n_inner = float(
+            getattr(sol, "n_iters", getattr(sol, "n_weight_updates", 0))
+        )
+        max_strain = float(getattr(sol, "max_strain", 0.0))
+        max_stress = float(getattr(sol, "max_stress", 0.0))
         self.iteration +=1
         self.time += self.fluid_substeps * self.dt
         info={
@@ -244,13 +310,18 @@ class QuasiStaticFSI:
                 np.max(np.linalg.norm(self.nodes - self.x_bc, axis =1))
             ),
             "shape_residual": shape_res,
-            "uwm_residual" : float(uwm.residual),
-            "uwm_updates" : float(uwm.n_weight_updates),
+            "uwm_residual" : float(sol.residual),
+            "uwm_updates" : n_inner,
+            "energy_residual": float(sol.residual),
+            "energy_iters": n_inner,
+            "max_strain": max_strain,
+            "max_stress": max_stress,
             "pressure_max": float(np.max(np.abs(pressure))),
             "net_fz": net_fz,
             "mean_uz": mean_uz,
             "cfl": float(self.fluid.max_cfl(self.dt)),
-            "objective": float(uwm.objective),
+            "objective": float(sol.objective),
+            "structure_solver": self.structure_solver,
         }
         self.history.iteration.append(self.iteration)
         self.history.max_disp.append(info["max_disp"])
