@@ -1,18 +1,18 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-"""Green–Lagrange membrane kinematics + constitutive stress/strain energy.
+"""Green–Lagrange membrane kinematics with ``F = I + ∇u``.
 
-Each triangular facet is a constant-strain total-Lagrangian membrane
-element. Strain is measured from a reference (typically flat) geometry;
-stress follows ``MembraneMaterial`` plane-stress elasticity with prestress.
+Continuum (plane stress)::
 
-Potential energy of the membrane::
+    u  = x - X                         # displacement field (ux, uy, uz)
+    F  = I + ∇u                        # deformation gradient (membrane: 3×2)
+    ε  = ½ (Fᵀ F - I)                  # Green–Lagrange (I is 2×2 in-plane)
+    σ  = D ε + σ₀                      # plane-stress constitutive relation
 
-    Π = Σₑ t A₀ W(ε)  −  Σᵢ f_extᵢ · uᵢ
-
-with ``W = ½ ε·D·ε + σ₀·ε``. Equilibrium is ``∂Π/∂x = 0`` on free nodes
-(internal constitutive forces balance external loads).
+Discrete CST triangle: ``∇u = Σ_a u_a ⊗ ∇N_a`` in the material chart ``Y``,
+and the reference embedding satisfies ``∂X/∂Y ≡ I_surf``, so
+``F = I_surf + ∇u = ∂x/∂Y``.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from typing import Optional, Tuple
 
 import numpy as np
 
-from materials import MembraneMaterial
+from materials import MembraneMaterial, green_lagrange_from_F
 
 
 @dataclass
@@ -34,20 +34,24 @@ class ElementState:
     energy_density: float
     area0: float
     energy: float  # t * A0 * W
+    F: np.ndarray  # 3×2
+    grad_u: np.ndarray  # 3×2
 
 
 def _local_material_frame(
     X0: np.ndarray, X1: np.ndarray, X2: np.ndarray
 ) -> Tuple[np.ndarray, np.ndarray, float]:
-    """Orthonormal in-plane basis and reference area from undeformed triangle."""
+    """Orthonormal in-plane basis and reference area."""
     A1 = X1 - X0
     A2 = X2 - X0
     nrm = np.cross(A1, A2)
     area0 = 0.5 * float(np.linalg.norm(nrm))
     if area0 < 1e-16:
-        e1 = np.array([1.0, 0.0, 0.0])
-        e2 = np.array([0.0, 1.0, 0.0])
-        return e1, e2, 0.0
+        return (
+            np.array([1.0, 0.0, 0.0]),
+            np.array([0.0, 1.0, 0.0]),
+            0.0,
+        )
     e1 = A1 / (np.linalg.norm(A1) + 1e-16)
     e2 = A2 - np.dot(A2, e1) * e1
     e2 = e2 / (np.linalg.norm(e2) + 1e-16)
@@ -56,15 +60,66 @@ def _local_material_frame(
 
 def reference_2d_coords(
     X0: np.ndarray, X1: np.ndarray, X2: np.ndarray
-) -> Tuple[np.ndarray, float]:
-    """Map reference triangle to 2D material coordinates (origin at X0)."""
+) -> Tuple[np.ndarray, np.ndarray, float]:
+    """Material coords ``Y`` (3×2), surface identity ``I_surf`` (3×2), area."""
     e1, e2, area0 = _local_material_frame(X0, X1, X2)
     Y = np.zeros((3, 2), dtype=float)
     for a, X in enumerate((X0, X1, X2)):
         d = X - X0
         Y[a, 0] = float(np.dot(d, e1))
         Y[a, 1] = float(np.dot(d, e2))
-    return Y, area0
+    # ∂X/∂Y in the local frame where X = X0 + Y1 e1 + Y2 e2: the surface "I"
+    I_surf = np.column_stack((e1, e2))  # 3×2
+    return Y, I_surf, area0
+
+
+def shape_gradients(Y: np.ndarray) -> np.ndarray:
+    """CST material gradients ``∇N`` with shape ``(3_nodes, 2)``."""
+    J = np.column_stack((Y[1] - Y[0], Y[2] - Y[0]))
+    det = float(np.linalg.det(J))
+    gradN = np.zeros((3, 2), dtype=float)
+    if abs(det) < 1e-18:
+        return gradN
+    Jinv = np.linalg.inv(J)
+    gradN[1] = Jinv.T @ np.array([1.0, 0.0])
+    gradN[2] = Jinv.T @ np.array([0.0, 1.0])
+    gradN[0] = -gradN[1] - gradN[2]
+    return gradN
+
+
+def grad_u_triangle(
+    u_nodes: np.ndarray,
+    gradN: np.ndarray,
+) -> np.ndarray:
+    """``∇u = Σ_a u_a ⊗ ∇N_a`` → ``(3, 2)`` for one triangle.
+
+    ``u_nodes`` is ``(3, 3)`` with rows ``[ux, uy, uz]`` at the three vertices.
+    """
+    g = np.zeros((3, 2), dtype=float)
+    for a in range(3):
+        g += np.outer(u_nodes[a], gradN[a])
+    return g
+
+
+def deformation_gradient_from_u(
+    u_nodes: np.ndarray,
+    X_nodes: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+    """Build ``F = I + ∇u`` on one triangle.
+
+    Returns
+    -------
+    F, grad_u, gradN, area0
+        ``F`` and ``grad_u`` are ``(3, 2)``; ``I`` is the surface embedding
+        ``I_surf = ∂X/∂Y`` so that ``F = I_surf + ∇u``.
+    """
+    Y, I_surf, area0 = reference_2d_coords(
+        X_nodes[0], X_nodes[1], X_nodes[2]
+    )
+    gradN = shape_gradients(Y)
+    gu = grad_u_triangle(np.asarray(u_nodes, dtype=float), gradN)
+    F = I_surf + gu  # F = I + grad(u)
+    return F, gu, gradN, area0
 
 
 def deformation_gradient(
@@ -73,33 +128,44 @@ def deformation_gradient(
     x2: np.ndarray,
     Y: np.ndarray,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Return ``F`` (3×2) and material shape-function gradients ``∇N`` (3×2)."""
-    J = np.column_stack((Y[1] - Y[0], Y[2] - Y[0]))  # 2×2
+    """Legacy helper: ``F = ∂x/∂Y`` (equivalent to ``I + ∇u``)."""
+    J = np.column_stack((Y[1] - Y[0], Y[2] - Y[0]))
     det = float(np.linalg.det(J))
     if abs(det) < 1e-18:
-        F = np.zeros((3, 2), dtype=float)
-        gradN = np.zeros((3, 2), dtype=float)
-        return F, gradN
+        return np.zeros((3, 2)), np.zeros((3, 2))
     Jinv = np.linalg.inv(J)
-    a1 = x1 - x0
-    a2 = x2 - x0
-    F = np.column_stack((a1, a2)) @ Jinv  # 3×2
-
-    # N0=1-ξ-η, N1=ξ, N2=η; [ξ,η]^T = Jinv (Y-Y0)
-    gradN = np.zeros((3, 2), dtype=float)
-    gradN[1] = Jinv.T @ np.array([1.0, 0.0])
-    gradN[2] = Jinv.T @ np.array([0.0, 1.0])
-    gradN[0] = -gradN[1] - gradN[2]
+    F = np.column_stack((x1 - x0, x2 - x0)) @ Jinv
+    gradN = shape_gradients(Y)
     return F, gradN
 
 
 def green_lagrange_voigt(F: np.ndarray) -> np.ndarray:
-    """Green–Lagrange strain in Voigt form ``[E₁₁, E₂₂, 2 E₁₂]``."""
-    C = F.T @ F
-    E11 = 0.5 * (C[0, 0] - 1.0)
-    E22 = 0.5 * (C[1, 1] - 1.0)
-    E12 = 0.5 * C[0, 1]
-    return np.array([E11, E22, 2.0 * E12], dtype=float)
+    """``ε = ½(Fᵀ F - I)`` in Voigt form ``[E₁₁, E₂₂, 2 E₁₂]``."""
+    _E, eps = green_lagrange_from_F(F)
+    return eps
+
+
+def element_state_from_u(
+    u_nodes: np.ndarray,
+    X_nodes: np.ndarray,
+    material: MembraneMaterial,
+) -> Tuple[ElementState, np.ndarray]:
+    """Strain/stress on one triangle from nodal displacement ``u = x - X``."""
+    F, gu, gradN, area0 = deformation_gradient_from_u(u_nodes, X_nodes)
+    eps = green_lagrange_voigt(F)
+    sig = material.constitutive_relation(eps)  # σ = D ε + σ₀
+    W = material.strain_energy_density(eps)
+    energy = W * float(material.thickness) * area0
+    state = ElementState(
+        strain_voigt=eps,
+        stress_voigt=sig,
+        energy_density=W,
+        area0=area0,
+        energy=energy,
+        F=F,
+        grad_u=gu,
+    )
+    return state, gradN
 
 
 def element_constitutive_state(
@@ -107,27 +173,10 @@ def element_constitutive_state(
     X_nodes: np.ndarray,
     material: MembraneMaterial,
 ) -> Tuple[ElementState, np.ndarray, np.ndarray]:
-    """Strain, stress, energy and ``(F, ∇N)`` for one triangle.
-
-    ``x_nodes``, ``X_nodes`` are ``(3, 3)`` current / reference coordinates.
-    """
-    Y, area0 = reference_2d_coords(X_nodes[0], X_nodes[1], X_nodes[2])
-    F, gradN = deformation_gradient(
-        x_nodes[0], x_nodes[1], x_nodes[2], Y
-    )
-    eps = green_lagrange_voigt(F)
-    sig = material.stress(eps)
-    W = material.strain_energy_density(eps)
-    t = float(material.thickness)
-    energy = W * t * area0
-    state = ElementState(
-        strain_voigt=eps,
-        stress_voigt=sig,
-        energy_density=W,
-        area0=area0,
-        energy=energy,
-    )
-    return state, F, gradN
+    """Same as :func:`element_state_from_u` with ``u = x - X``."""
+    u_nodes = np.asarray(x_nodes, dtype=float) - np.asarray(X_nodes, dtype=float)
+    state, gradN = element_state_from_u(u_nodes, X_nodes, material)
+    return state, state.F, gradN
 
 
 def element_internal_forces(
@@ -135,15 +184,42 @@ def element_internal_forces(
     X_nodes: np.ndarray,
     material: MembraneMaterial,
 ) -> Tuple[np.ndarray, ElementState]:
-    """Nodal internal forces ``(3, 3)`` from constitutive stress (total Lagrangian)."""
+    """Nodal internal forces from constitutive stress (total Lagrangian)."""
     state, F, gradN = element_constitutive_state(x_nodes, X_nodes, material)
-    S = material.pk2_matrix(state.strain_voigt)  # 2×2
-    P = F @ S  # first PK, 3×2
+    S = material.pk2_matrix(state.strain_voigt)
+    P = F @ S
     tA = float(material.thickness) * state.area0
     f = np.zeros((3, 3), dtype=float)
     for a in range(3):
         f[a] = tA * (P @ gradN[a])
     return f, state
+
+
+def stress_from_displacement_field(
+    u: np.ndarray,
+    nodes_ref: np.ndarray,
+    elements: np.ndarray,
+    material: MembraneMaterial,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Green–Lagrange strain and plane-stress ``σ`` on every element.
+
+    Parameters
+    ----------
+    u :
+        Nodal displacement ``(n_nodes, 3)`` with columns ``ux, uy, uz``
+        (i.e. ``sim.nodes - sim.nodes_ref``).
+    """
+    u = np.asarray(u, dtype=float)
+    nodes_ref = np.asarray(nodes_ref, dtype=float)
+    elements = np.asarray(elements, dtype=int)
+    n_e = elements.shape[0]
+    strain_elem = np.zeros((n_e, 3), dtype=float)
+    stress_elem = np.zeros((n_e, 3), dtype=float)
+    for e, conn in enumerate(elements):
+        state, _ = element_state_from_u(u[conn], nodes_ref[conn], material)
+        strain_elem[e] = state.strain_voigt
+        stress_elem[e] = state.stress_voigt
+    return strain_elem, stress_elem
 
 
 def assemble_internal_forces(
@@ -152,13 +228,7 @@ def assemble_internal_forces(
     nodes0: np.ndarray,
     material: MembraneMaterial,
 ) -> Tuple[np.ndarray, float, np.ndarray, np.ndarray]:
-    """Assemble nodal internal forces and total internal potential.
-
-    Returns
-    -------
-    f_int, Pi_int, strain_elem, stress_elem
-        ``strain_elem`` / ``stress_elem`` are ``(n_elem, 3)`` Voigt arrays.
-    """
+    """Assemble ``f_int``, ``Π_int``, and element strain/stress."""
     nodes = np.asarray(nodes, dtype=float)
     nodes0 = np.asarray(nodes0, dtype=float)
     elements = np.asarray(elements, dtype=int)
@@ -169,9 +239,7 @@ def assemble_internal_forces(
     stress_elem = np.zeros((n_e, 3), dtype=float)
 
     for e, conn in enumerate(elements):
-        f_e, state = element_internal_forces(
-            nodes[conn], nodes0[conn], material
-        )
+        f_e, state = element_internal_forces(nodes[conn], nodes0[conn], material)
         f_int[conn] += f_e
         Pi += state.energy
         strain_elem[e] = state.strain_voigt
@@ -188,7 +256,7 @@ def total_potential(
     f_ext: Optional[np.ndarray] = None,
     x_ref_work: Optional[np.ndarray] = None,
 ) -> float:
-    """Total potential ``Π_int − f_ext · (x − x_ref)``."""
+    """Total potential ``Π_int − f_ext · u``."""
     _, Pi_int, _, _ = assemble_internal_forces(
         nodes, elements, nodes0, material
     )
