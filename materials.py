@@ -1,11 +1,18 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-"""Membrane material model and plane-stress constitutive relation."""
+"""Membrane material model and plane-stress constitutive relation.
+
+Plane stress is written in the usual reduced form of isotropic elasticity
+(``D`` below). Out-of-plane strain is *not* forced to zero in 3D space:
+the membrane lives on a surface, and we only constitutively relate the
+*in-plane* Green–Lagrange strain to the in-plane PK2 stress.
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 
@@ -20,6 +27,11 @@ class MembraneMaterial:
 
     where ``ε = [E₁₁, E₂₂, 2 E₁₂]``, ``σ = [S₁₁, S₂₂, S₁₂]``,
     ``D = plane_stress_matrix()``, and ``σ₀`` is isotropic prestress.
+
+    Do **not** form ``F = I + grad(u)`` with UFL/`grad` on nodal arrays.
+    Membrane kinematics build a 3×2 ``F`` per triangle from deformed
+    positions ``x`` vs reference ``X`` (see :mod:`constitutive`);
+    displacement is only ``u = x - X`` for bookkeeping.
     """
 
     E: float = 5.0e8
@@ -40,6 +52,9 @@ class MembraneMaterial:
             dtype=float,
         )
 
+    # N_pre = prestress × thickness is the membrane stress *resultant* [N/m]
+    # used by the legacy UWM path. Confirm against Allan's thesis whether the
+    # tabulated "prestress" is already a resultant or a Cauchy stress [Pa].
     @property
     def N_pre(self) -> float:
         """Prestress resultant [N/m] = prestress × thickness."""
@@ -50,14 +65,23 @@ class MembraneMaterial:
         s0 = float(self.prestress)
         return np.array([s0, s0, 0.0], dtype=float)
 
-    def stress(self, strain_voigt: np.ndarray) -> np.ndarray:
-        """Cauchy/PK2 stress (Voigt) from Green–Lagrange strain (Voigt).
+    def constitutive_relation(self, strain_voigt: np.ndarray) -> np.ndarray:
+        """Constitutive map used by potential-energy minimisation.
 
         Parameters
         ----------
         strain_voigt :
-            ``[E₁₁, E₂₂, 2 E₁₂]``
+            Green–Lagrange strain ``[E₁₁, E₂₂, 2 E₁₂]``.
+
+        Returns
+        -------
+        sigma :
+            PK2 stress ``[S₁₁, S₂₂, S₁₂] = D ε + σ₀``.
         """
+        return self.stress(strain_voigt)
+
+    def stress(self, strain_voigt: np.ndarray) -> np.ndarray:
+        """PK2 stress (Voigt) from Green–Lagrange strain (Voigt)."""
         eps = np.asarray(strain_voigt, dtype=float).reshape(3)
         return self.plane_stress_matrix() @ eps + self.prestress_voigt()
 
@@ -72,3 +96,25 @@ class MembraneMaterial:
         """Return 2×2 second Piola–Kirchhoff stress from Voigt strain."""
         s = self.stress(strain_voigt)
         return np.array([[s[0], s[2]], [s[2], s[1]]], dtype=float)
+
+    def constitutive_relation_from_sim(self, sim: Any) -> np.ndarray:
+        """Element PK2 stresses from a deformed ``QuasiStaticFSI`` state.
+
+        Uses ``sim.nodes`` (deformed ``x``) and ``sim.nodes_ref`` (reference
+        ``X``). Displacement ``u = x - X`` is implied by those positions;
+        it is not differentiated with ``grad(u)``.
+
+        Returns
+        -------
+        stress_elem :
+            Array ``(n_elements, 3)`` with rows ``[S₁₁, S₂₂, S₁₂]``.
+        """
+        from constitutive import assemble_internal_forces
+
+        _f, _Pi, _strain, stress_elem = assemble_internal_forces(
+            sim.nodes,
+            sim.mesh.elements,
+            sim.nodes_ref,
+            self,
+        )
+        return stress_elem
