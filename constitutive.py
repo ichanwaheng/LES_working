@@ -22,7 +22,15 @@ from typing import Optional, Tuple
 
 import numpy as np
 
-from materials import MembraneMaterial, green_lagrange_from_F
+from materials import MembraneMaterial
+
+
+def green_lagrange_from_F(F: np.ndarray):
+    """``ε = ½(Fᵀ F - I)`` → (2×2 tensor, Voigt ``[E11, E22, 2E12]``)."""
+    I2 = np.eye(2)
+    E = 0.5 * (F.T @ F - I2)
+    eps_voigt = np.array([E[0, 0], E[1, 1], 2.0 * E[0, 1]], dtype=float)
+    return E, eps_voigt
 
 
 @dataclass
@@ -153,7 +161,7 @@ def element_state_from_u(
     """Strain/stress on one triangle from nodal displacement ``u = x - X``."""
     F, gu, gradN, area0 = deformation_gradient_from_u(u_nodes, X_nodes)
     eps = green_lagrange_voigt(F)
-    sig = material.constitutive_relation(eps)  # σ = D ε + σ₀
+    sig = material.stress(eps)  # σ = D ε + σ₀  (Voigt)
     W = material.strain_energy_density(eps)
     energy = W * float(material.thickness) * area0
     state = ElementState(

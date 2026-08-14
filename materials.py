@@ -1,26 +1,21 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-"""Membrane material + plane-stress constitutive relation.
-
-Continuum statement (plane stress, Green–Lagrange)::
-
-    u = x - X
-    F = I + ∇u
-    ε = ½ (Fᵀ F - I)
-    σ = D ε + σ₀
-
-On the membrane, ``I`` / ``∇u`` / ``F`` live in the *in-plane material*
-chart (``F`` is 3×2, ``I`` in ``FᵀF - I`` is 2×2). Nodal ``grad(u)`` is
-the CST shape-function gradient — not UFL ``grad`` on a NumPy vector.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional, Tuple
+from typing import Any
 
 import numpy as np
+
+# Do NOT use: from ufl import grad
+# ufl.grad only works on UFL/FEniCS Function fields in a form compiler,
+# not on NumPy nodal arrays.
+
+
+# Plane stress (in-plane Green–Lagrange → in-plane PK2).
+# Out-of-plane *membrane* motion (uz) is allowed; the constitutive law
+# only relates the in-plane strain components on the surface.
 
 
 @dataclass
@@ -31,8 +26,8 @@ class MembraneMaterial:
     prestress: float = 5.0e4
 
     def plane_stress_matrix(self) -> np.ndarray:
-        """Constitutive matrix ``D`` (plane stress, Voigt)."""
-        E, nu = float(self.E), float(self.nu)
+        """Constitutive matrix D (plane stress, Voigt 3×3)."""
+        E, nu = self.E, self.nu
         factor = E / (1.0 - nu**2)
         return factor * np.array(
             [
@@ -43,64 +38,59 @@ class MembraneMaterial:
             dtype=float,
         )
 
-    # Confirm vs Allan's thesis: prestress [Pa] × thickness → resultant [N/m].
+    # Check vs Allan's thesis: prestress [Pa] × thickness → resultant [N/m].
     @property
     def N_pre(self) -> float:
-        return float(self.prestress) * float(self.thickness)
+        return self.prestress * self.thickness
 
     def prestress_voigt(self) -> np.ndarray:
-        """Isotropic prestress ``σ₀ = [S₁₁, S₂₂, S₁₂]``."""
         s0 = float(self.prestress)
         return np.array([s0, s0, 0.0], dtype=float)
 
-    def constitutive_relation(
-        self,
-        epsilon: np.ndarray,
-    ) -> np.ndarray:
-        """Plane-stress map ``σ = D ε + σ₀`` (Voigt).
+    def constitutive_relation(self, sim: Any) -> np.ndarray:
+        """Plane-stress constitutive relation for the deformed membrane.
 
-        Parameters
-        ----------
-        epsilon :
-            Green–Lagrange strain ``[E₁₁, E₂₂, 2 E₁₂]``.
-        """
-        eps = np.asarray(epsilon, dtype=float).reshape(3)
-        return self.plane_stress_matrix() @ eps + self.prestress_voigt()
+        Continuum statement
+        -------------------
+        ::
 
-    # Aliases used by constitutive.py / energy_minimize.py
-    def stress(self, strain_voigt: np.ndarray) -> np.ndarray:
-        return self.constitutive_relation(strain_voigt)
+            u = x - X                         # displacement (ux, uy, uz)
+            F = I + ∇u                        # deformation gradient
+            ε = ½ (Fᵀ F - I)                  # Green–Lagrange strain
+            σ = D ε + σ₀                      # plane stress (D = plane_stress_matrix)
 
-    def strain_energy_density(self, strain_voigt: np.ndarray) -> float:
-        eps = np.asarray(strain_voigt, dtype=float).reshape(3)
-        D = self.plane_stress_matrix()
-        s0 = self.prestress_voigt()
-        return float(0.5 * eps @ D @ eps + s0 @ eps)
-
-    def pk2_matrix(self, strain_voigt: np.ndarray) -> np.ndarray:
-        s = self.constitutive_relation(strain_voigt)
-        return np.array([[s[0], s[2]], [s[2], s[1]]], dtype=float)
-
-    def constitutive_relation_from_sim(self, sim: Any) -> np.ndarray:
-        """Element stresses from deformed ``sim`` using ``ε = ½(FᵀF - I)``.
-
-        Displacement field::
-
-            u = sim.nodes - sim.nodes_ref   # (n_nodes, 3); columns ux, uy, uz
-
-        Per triangle, ``F = I + ∇u`` in the material plane, then
-        ``ε = ½(FᵀF - I)`` and ``σ = D ε + σ₀``.
+        Why the naive NumPy/UFL draft fails
+        -----------------------------------
+        1. ``from ufl import grad`` — UFL gradients are for FEniCS forms, not
+           NumPy vectors of nodal values.
+        2. ``u = np.array([ux, uy, uz])`` has shape ``(3, n_nodes)``. The
+           displacement field must be ``(n_nodes, 3)``.
+        3. A membrane ``F`` is ``3×2`` in the surface chart (not ``I₃ + ∇u``
+           in 3D). In ``ε = ½(FᵀF − I)``, that ``I`` is ``2×2``.
+        4. ``D`` is ``3×3`` and multiplies Voigt ``[E11, E22, 2 E12]``, not a
+           ``2×2``/``3×3`` strain matrix.
+        5. ``constitutive_relation`` must be a *method* on this class (it uses
+           ``self.plane_stress_matrix``), not a free function with a bare
+           ``self`` argument.
+        6. Prestress should enter as ``σ = D ε + σ₀``.
 
         Returns
         -------
-        sigma :
-            ``(n_elements, 3)`` with rows ``[S₁₁, S₂₂, S₁₂]``.
+        sigma : ndarray, shape (n_elements, 3)
+            PK2 stress per triangle ``[S11, S22, S12]``.
         """
         from constitutive import stress_from_displacement_field
 
+        # Displacement field u = x - X  →  columns ux, uy, uz
+        # (same as ux,uy,uz above, stacked correctly)
         u = np.asarray(sim.nodes, dtype=float) - np.asarray(
             sim.nodes_ref, dtype=float
-        )
+        )  # shape (n_nodes, 3)
+
+        # Per triangle in constitutive.py:
+        #   F = I_surf + grad(u)      # I_surf = ∂X/∂Y  (3×2), grad(u) from CST ∇N
+        #   epsilon = 0.5*(F.T@F - I2)
+        #   sigma   = D @ voigt(epsilon) + prestress
         _eps, sigma = stress_from_displacement_field(
             u,
             sim.nodes_ref,
@@ -109,10 +99,19 @@ class MembraneMaterial:
         )
         return sigma
 
+    # --- helpers used by energy minimisation (Voigt form) -------------------
 
-def green_lagrange_from_F(F: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-    """``ε = ½(Fᵀ F - I)`` → (2×2 tensor, Voigt ``[E11, E22, 2E12]``)."""
-    I2 = np.eye(2)
-    E = 0.5 * (F.T @ F - I2)
-    eps_voigt = np.array([E[0, 0], E[1, 1], 2.0 * E[0, 1]], dtype=float)
-    return E, eps_voigt
+    def stress(self, strain_voigt: np.ndarray) -> np.ndarray:
+        """σ = D ε + σ₀ with ε = [E11, E22, 2 E12]."""
+        eps = np.asarray(strain_voigt, dtype=float).reshape(3)
+        return self.plane_stress_matrix() @ eps + self.prestress_voigt()
+
+    def strain_energy_density(self, strain_voigt: np.ndarray) -> float:
+        eps = np.asarray(strain_voigt, dtype=float).reshape(3)
+        D = self.plane_stress_matrix()
+        s0 = self.prestress_voigt()
+        return float(0.5 * eps @ D @ eps + s0 @ eps)
+
+    def pk2_matrix(self, strain_voigt: np.ndarray) -> np.ndarray:
+        s = self.stress(strain_voigt)
+        return np.array([[s[0], s[2]], [s[2], s[1]]], dtype=float)
