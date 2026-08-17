@@ -24,6 +24,7 @@ if str(_ROOT) not in sys.path:
 
 import Coupling
 import UWM
+from energy_minimize import EnergyMinResult, minimize_potential_energy
 
 
 # In[10]:
@@ -34,6 +35,8 @@ __all__ = [
     "QuasiStaticHistory",
     "updated_weight_form_find",
     "UWMResult",
+    "minimize_potential_energy",
+    "EnergyMinResult",
 ]
 
 
