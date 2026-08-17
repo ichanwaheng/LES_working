@@ -81,16 +81,9 @@ class QuasiStaticFSI:
             fcfg["membrane_y0"],
             fcfg["membrane_z0"],
         )
-        self.mesh = build_rectangular_membrane(
-            length=mcfg["length"],
-            width= mcfg["width"],
-            nx= mcfg["nx"],
-            ny= mcfg["ny"],
-            origin= origin,
-            fixed_edges = mcfg.get("fixed_edges", ["left", "right", "bottom", "top"]),
-            thickness = mcfg["thickness"],
-            density = mcfg["density"],
-        )
+        # Membrane length/width/nx/ny/thickness/density/fixed_edges come from
+        # geometry.build_rectangular_membrane defaults, not from YAML.
+        self.mesh = build_rectangular_membrane(origin=origin)
         sag = float(qcfg.get("initial_sag", 0.03))
         self.mesh.nodes = initial_sag_shape(self.mesh, sag=sag)
 
@@ -99,7 +92,7 @@ class QuasiStaticFSI:
         material = MembraneMaterial(
             E= float(mcfg["youngs_modulus"]),
             nu= float(mcfg["poisson"]),
-            thickness = float(mcfg["thickness"]),
+            thickness = float(self.mesh.thickness),
             prestress = float(mcfg["prestress"]),
         )
         self.N_pre = float(material.N_pre)
