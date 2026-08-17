@@ -59,20 +59,29 @@ class MembraneMaterial:
             ε = ½ (Fᵀ F - I)                  # Green–Lagrange strain
             σ = D ε + σ₀                      # plane stress (D = plane_stress_matrix)
 
-        Why the naive NumPy/UFL draft fails
-        -----------------------------------
-        1. ``from ufl import grad`` — UFL gradients are for FEniCS forms, not
-           NumPy vectors of nodal values.
-        2. ``u = np.array([ux, uy, uz])`` has shape ``(3, n_nodes)``. The
-           displacement field must be ``(n_nodes, 3)``.
-        3. A membrane ``F`` is ``3×2`` in the surface chart (not ``I₃ + ∇u``
-           in 3D). In ``ε = ½(FᵀF − I)``, that ``I`` is ``2×2``.
-        4. ``D`` is ``3×3`` and multiplies Voigt ``[E11, E22, 2 E12]``, not a
-           ``2×2``/``3×3`` strain matrix.
-        5. ``constitutive_relation`` must be a *method* on this class (it uses
-           ``self.plane_stress_matrix``), not a free function with a bare
-           ``self`` argument.
-        6. Prestress should enter as ``σ = D ε + σ₀``.
+        Why drafts with ``np.gradient`` / ``ufl.grad`` fail
+        -------------------------------------------------
+        1. ``from ufl import grad`` — FEniCS only; not for NumPy nodes.
+        2. ``grad(u) = ...`` is invalid Python (cannot assign to a call).
+        3. After ``u = sim.nodes - sim.nodes_ref``, there are no separate
+           ``ux, uy, uz`` names unless you unpack columns::
+
+               ux, uy, uz = u[:, 0], u[:, 1], u[:, 2]
+
+        4. ``np.gradient(ux, dx, dy, dz)`` needs a *regular 3D grid* and
+           spacings ``dx,dy,dz``. Membrane nodes are an unstructured /
+           surface mesh — those spacings are undefined, and nodal vectors
+           are not ``(nx,ny,nz)`` fields.
+        5. Membrane ``F`` is ``3×2`` (surface chart). ``I`` in
+           ``ε = ½(FᵀF − I)`` is ``2×2``, not ``eye(3)``.
+        6. ``D @ epsilon`` needs Voigt ``[E11, E22, 2 E12]``, not a
+           ``3×3`` matrix.
+        7. Must be a *method* on this class; include prestress ``σ₀``.
+
+        Correct discrete ``∇u`` is the CST shape-function gradient on each
+        triangle (see ``constitutive.deformation_gradient_from_u``)::
+
+            F = I_surf + Σ_a u_a ⊗ ∇N_a
 
         Returns
         -------
@@ -81,16 +90,15 @@ class MembraneMaterial:
         """
         from constitutive import stress_from_displacement_field
 
-        # Displacement field u = x - X  →  columns ux, uy, uz
-        # (same as ux,uy,uz above, stacked correctly)
+        # u = x - X  (n_nodes, 3) with columns ux, uy, uz
         u = np.asarray(sim.nodes, dtype=float) - np.asarray(
             sim.nodes_ref, dtype=float
-        )  # shape (n_nodes, 3)
+        )
 
-        # Per triangle in constitutive.py:
-        #   F = I_surf + grad(u)      # I_surf = ∂X/∂Y  (3×2), grad(u) from CST ∇N
-        #   epsilon = 0.5*(F.T@F - I2)
-        #   sigma   = D @ voigt(epsilon) + prestress
+        # Per triangle (constitutive.py):
+        #   F = I_surf + grad(u)
+        #   epsilon = 0.5 * (F.T @ F - I2)
+        #   sigma = D @ voigt(epsilon) + prestress
         _eps, sigma = stress_from_displacement_field(
             u,
             sim.nodes_ref,
