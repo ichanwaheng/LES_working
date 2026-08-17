@@ -8,14 +8,8 @@ from typing import Any
 
 import numpy as np
 
-# Do NOT use: from ufl import grad
-# ufl.grad only works on UFL/FEniCS Function fields in a form compiler,
-# not on NumPy nodal arrays.
-
-
-# Plane stress (in-plane Green–Lagrange → in-plane PK2).
-# Out-of-plane *membrane* motion (uz) is allowed; the constitutive law
-# only relates the in-plane strain components on the surface.
+# Plane stress: in-plane Green–Lagrange strain → in-plane stress via D.
+# Prestress is NOT added inside σ = D ε; it is kept separate as N_pre.
 
 
 @dataclass
@@ -38,67 +32,29 @@ class MembraneMaterial:
             dtype=float,
         )
 
-    # Check vs Allan's thesis: prestress [Pa] × thickness → resultant [N/m].
+    # Separate from constitutive map σ = D ε (check vs Allan's thesis).
     @property
     def N_pre(self) -> float:
         return self.prestress * self.thickness
 
-    def prestress_voigt(self) -> np.ndarray:
-        s0 = float(self.prestress)
-        return np.array([s0, s0, 0.0], dtype=float)
-
     def constitutive_relation(self, sim: Any) -> np.ndarray:
-        """Plane-stress constitutive relation for the deformed membrane.
+        """
+        Continuum:
+            u = x - X
+            F = I + ∇u
+            ε = ½ (Fᵀ F - I)          # Green–Lagrange
+            σ = D ε                   # plane stress (NO prestress term)
 
-        Continuum statement
-        -------------------
-        ::
-
-            u = x - X                         # displacement (ux, uy, uz)
-            F = I + ∇u                        # deformation gradient
-            ε = ½ (Fᵀ F - I)                  # Green–Lagrange strain
-            σ = D ε + σ₀                      # plane stress (D = plane_stress_matrix)
-
-        Why drafts with ``np.gradient`` / ``ufl.grad`` fail
-        -------------------------------------------------
-        1. ``from ufl import grad`` — FEniCS only; not for NumPy nodes.
-        2. ``grad(u) = ...`` is invalid Python (cannot assign to a call).
-        3. After ``u = sim.nodes - sim.nodes_ref``, there are no separate
-           ``ux, uy, uz`` names unless you unpack columns::
-
-               ux, uy, uz = u[:, 0], u[:, 1], u[:, 2]
-
-        4. ``np.gradient(ux, dx, dy, dz)`` needs a *regular 3D grid* and
-           spacings ``dx,dy,dz``. Membrane nodes are an unstructured /
-           surface mesh — those spacings are undefined, and nodal vectors
-           are not ``(nx,ny,nz)`` fields.
-        5. Membrane ``F`` is ``3×2`` (surface chart). ``I`` in
-           ``ε = ½(FᵀF − I)`` is ``2×2``, not ``eye(3)``.
-        6. ``D @ epsilon`` needs Voigt ``[E11, E22, 2 E12]``, not a
-           ``3×3`` matrix.
-        7. Must be a *method* on this class; include prestress ``σ₀``.
-
-        Correct discrete ``∇u`` is the CST shape-function gradient on each
-        triangle (see ``constitutive.deformation_gradient_from_u``)::
-
-            F = I_surf + Σ_a u_a ⊗ ∇N_a
+        Discrete ∇u is the CST shape-function gradient per triangle
+        (see constitutive.py), not ufl.grad / np.gradient.
 
         Returns
         -------
-        sigma : ndarray, shape (n_elements, 3)
-            PK2 stress per triangle ``[S11, S22, S12]``.
+        sigma : (n_elements, 3) with rows [S11, S22, S12]
         """
         from constitutive import stress_from_displacement_field
 
-        # u = x - X  (n_nodes, 3) with columns ux, uy, uz
-        u = np.asarray(sim.nodes, dtype=float) - np.asarray(
-            sim.nodes_ref, dtype=float
-        )
-
-        # Per triangle (constitutive.py):
-        #   F = I_surf + grad(u)
-        #   epsilon = 0.5 * (F.T @ F - I2)
-        #   sigma = D @ voigt(epsilon) + prestress
+        u = sim.nodes - sim.nodes_ref  # (n_nodes, 3): ux, uy, uz
         _eps, sigma = stress_from_displacement_field(
             u,
             sim.nodes_ref,
@@ -107,18 +63,16 @@ class MembraneMaterial:
         )
         return sigma
 
-    # --- helpers used by energy minimisation (Voigt form) -------------------
-
     def stress(self, strain_voigt: np.ndarray) -> np.ndarray:
-        """σ = D ε + σ₀ with ε = [E11, E22, 2 E12]."""
+        """σ = D ε with ε = [E11, E22, 2 E12]."""
         eps = np.asarray(strain_voigt, dtype=float).reshape(3)
-        return self.plane_stress_matrix() @ eps + self.prestress_voigt()
+        return self.plane_stress_matrix() @ eps
 
     def strain_energy_density(self, strain_voigt: np.ndarray) -> float:
+        """W = ½ ε · D · ε."""
         eps = np.asarray(strain_voigt, dtype=float).reshape(3)
         D = self.plane_stress_matrix()
-        s0 = self.prestress_voigt()
-        return float(0.5 * eps @ D @ eps + s0 @ eps)
+        return float(0.5 * eps @ D @ eps)
 
     def pk2_matrix(self, strain_voigt: np.ndarray) -> np.ndarray:
         s = self.stress(strain_voigt)

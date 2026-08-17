@@ -5,9 +5,9 @@
 
 Finds free-node positions that minimise::
 
-    Π(x) = Σₑ t A₀ (½ ε·D·ε + σ₀·ε)  −  f_ext · u
+    Π(x) = Σₑ t A₀ (½ ε·D·ε)  −  f_ext · u
 
-where ``ε`` / ``σ`` come from :mod:`constitutive` and :class:`MembraneMaterial`.
+with analytic gradient from constitutive internal forces (σ = D ε).
 The gradient ``∇Π = f_int − f_ext`` uses the total-Lagrangian constitutive
 internal forces, so stress/strain enter the minimisation directly.
 """

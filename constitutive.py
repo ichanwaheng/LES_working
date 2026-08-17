@@ -8,7 +8,7 @@ Continuum (plane stress)::
     u  = x - X                         # displacement field (ux, uy, uz)
     F  = I + ∇u                        # deformation gradient (membrane: 3×2)
     ε  = ½ (Fᵀ F - I)                  # Green–Lagrange (I is 2×2 in-plane)
-    σ  = D ε + σ₀                      # plane-stress constitutive relation
+    σ  = D ε                           # plane-stress constitutive relation
 
 Discrete CST triangle: ``∇u = Σ_a u_a ⊗ ∇N_a`` in the material chart ``Y``,
 and the reference embedding satisfies ``∂X/∂Y ≡ I_surf``, so
@@ -161,7 +161,7 @@ def element_state_from_u(
     """Strain/stress on one triangle from nodal displacement ``u = x - X``."""
     F, gu, gradN, area0 = deformation_gradient_from_u(u_nodes, X_nodes)
     eps = green_lagrange_voigt(F)
-    sig = material.stress(eps)  # σ = D ε + σ₀  (Voigt)
+    sig = material.stress(eps)  # σ = D ε  (Voigt)
     W = material.strain_energy_density(eps)
     energy = W * float(material.thickness) * area0
     state = ElementState(
