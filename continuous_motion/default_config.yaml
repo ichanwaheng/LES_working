@@ -1,0 +1,78 @@
+# Config for continuous submerged-membrane motion video capture.
+# Stage 1: form-find (QuasiStaticFSI). Stage 2: dynamic motion in fluid flow.
+
+simulation:
+  name: continuous_membrane_motion
+  output_dir: continuous_motion/output
+  save_interval: 1
+  plot: true
+  video_fps: 12
+  video_amplify: 5.0
+
+time:
+  dt: 0.002
+  t_end: 2.0
+  cfl_max: 0.5
+
+membrane:
+  length: 2.0
+  width: 1.5
+  nx: 24
+  ny: 18
+  thickness: 0.001
+  density: 1200.0
+  youngs_modulus: 5.0e8
+  poisson: 0.3
+  prestress: 5.0e4
+  damping: 80.0
+  mass_scale: 80.0
+  fixed_edges: ["left", "right", "bottom", "top"]
+
+fluid:
+  domain:
+    L: 8.0
+    W: 3.0
+    H: 2.5
+  nx: 48
+  ny: 24
+  nz: 20
+  rho: 1.225
+  nu: 1.0e-3
+  U_inlet: 5.0
+  membrane_x0: 2.0
+  membrane_y0: 0.75
+  membrane_z0: 1.0
+  gust_amp: 0.15
+  gust_freq: 0.8
+
+quasi_static:
+  # Stage 1 — find the formed membrane (unchanged Coupling path)
+  max_iters: 12
+  fluid_substeps: 20
+  under_relaxation: 0.5
+  load_relaxation: 0.5
+  load_scale: 0.25
+  load_mode: pressure_jump
+  shape_tol: 1.0e-3
+  initial_sag: 0.03
+  uwm_weight_updates: 15
+  uwm_tol: 1.0e-7
+  uwm_relaxation: 1.0
+
+continuous_motion:
+  # Stage 2 — formed membrane submerged in flow, continuous dynamics
+  t_end: 2.0
+  fluid_substeps: 4
+  load_scale: 0.35
+  load_mode: pressure_jump
+  mass_scale: 80.0
+  damping: 80.0
+  # Explicit integrator substeps per outer FSI frame (stability)
+  structure_substeps: 4
+  record_every: 1
+  video_name: membrane_continuous_motion.mp4
+
+les:
+  enabled: true
+  Cs: 0.17
+  piso_correctors: 2

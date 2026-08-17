@@ -103,7 +103,7 @@ class QuasiStaticFSI:
         material = MembraneMaterial(
             E= float(mcfg["youngs_modulus"]),
             nu= float(mcfg["poisson"]),
-            thickness = float(mcfg["thickness"]),
+            thickness = float(self.mesh.thickness),
             prestress = float(mcfg["prestress"]),
         )
         self.material = material

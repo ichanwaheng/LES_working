@@ -17,21 +17,14 @@ time = {
     "cfl_max": 0.5
 }
 
-# Membrane geometric parameters
+# Membrane material / dynamics (geometry size & mesh come from geometry.py)
 membrane = {
-    "length": 2.0,
-    "width": 1.5,
-    "nx": 24,
-    "ny": 18,
-    "thickness": 0.001,
-    "density": 1200.0,
     "youngs_modulus": 5.0e+8,
     "poisson": 0.3,
     "prestress": 5.0e+4,
     "damping": 80.0,
     "mass_scale": 80.0,
-    "fixed_edges": ["left", "right", "bottom", "top"],
-    
+
     "fluid": {
         "domain": {
             "L": 8.0,
