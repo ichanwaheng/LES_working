@@ -91,3 +91,38 @@ def plot_force_history(
     fig.tight_layout()
     fig.savefig(out_path, dpi=140)
     plt.close(fig)
+
+
+def save_wake_gif(
+    frame_paths: list[str | Path],
+    out_path: str | Path,
+    fps: int = 8,
+) -> Path:
+    """Assemble mid-plane wake PNGs into an animated GIF."""
+    from PIL import Image
+
+    paths = [Path(p) for p in frame_paths if Path(p).is_file()]
+    if not paths:
+        raise ValueError("no wake frames to write into GIF")
+
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    frames = [Image.open(p).convert("P", palette=Image.ADAPTIVE) for p in paths]
+    duration_ms = max(int(1000 / max(fps, 1)), 20)
+    frames[0].save(
+        out_path,
+        save_all=True,
+        append_images=frames[1:],
+        duration=duration_ms,
+        loop=0,
+        optimize=False,
+    )
+    for im in frames:
+        im.close()
+    return out_path
+
+
+def wake_frames_from_dir(out_dir: str | Path) -> list[Path]:
+    """Sorted ``wake_t*.png`` paths in an output directory."""
+    out_dir = Path(out_dir)
+    return sorted(out_dir.glob("wake_t*.png"))

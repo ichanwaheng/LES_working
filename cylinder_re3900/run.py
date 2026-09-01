@@ -28,7 +28,7 @@ if str(HERE) not in sys.path:
 from cylinder import Cylinder
 from mesh import FluidGrid
 from piso import FluidSolver
-from viz import plot_force_history, plot_midplane
+from viz import plot_force_history, plot_midplane, save_wake_gif
 
 
 def load_config(path: Path) -> dict:
@@ -59,6 +59,17 @@ def parse_args():
         type=str,
         default=None,
         help="Output directory (default: config simulation.output_dir)",
+    )
+    p.add_argument(
+        "--gif-fps",
+        type=int,
+        default=None,
+        help="Wake GIF frames per second (default: config simulation.gif_fps)",
+    )
+    p.add_argument(
+        "--no-gif",
+        action="store_true",
+        help="Skip writing wake GIF at the end",
     )
     args, _ = p.parse_known_args()
     return args
@@ -163,6 +174,12 @@ def main() -> int:
 
     hist_path = out / "force_history.csv"
     times, Cds, Cls = [], [], []
+    wake_frames: list[Path] = []
+    gif_fps = (
+        int(args.gif_fps)
+        if args.gif_fps is not None
+        else int(cfg["simulation"].get("gif_fps", 8))
+    )
 
     with open(hist_path, "w", newline="", encoding="utf-8") as fcsv:
         writer = csv.writer(fcsv)
@@ -195,14 +212,16 @@ def main() -> int:
                 )
 
             if step % max(meta["plot_interval"], 1) == 0 or step == n_steps:
+                frame = out / f"wake_t{tUD:07.2f}.png"
                 plot_midplane(
                     grid,
                     st,
                     mask,
-                    out / f"wake_t{tUD:07.2f}.png",
+                    frame,
                     title=f"Re={meta['Re']:g}  tU/D={tUD:.2f}",
                     cylinder=cyl,
                 )
+                wake_frames.append(frame)
 
             if cfl > 2.0 * meta["cfl_max"]:
                 print(f"[cylinder] WARNING: CFL={cfl:.3f} large — consider reducing dt")
@@ -213,6 +232,12 @@ def main() -> int:
         np.asarray(Cls),
         out / "force_history.png",
     )
+
+    gif_path = None
+    if not args.no_gif and wake_frames:
+        gif_path = save_wake_gif(wake_frames, out / "cylinder_wake.gif", fps=gif_fps)
+        print(f"[cylinder] wake GIF → {gif_path}  ({len(wake_frames)} frames @ {gif_fps} fps)")
+
     np.savez_compressed(
         out / "final_state.npz",
         u=st.u,
@@ -230,6 +255,8 @@ def main() -> int:
         meta=np.array([meta], dtype=object),
     )
     print(f"[cylinder] done. forces → {hist_path}")
+    if gif_path is not None:
+        print(f"[cylinder] gif → {gif_path}")
     return 0
 
 
