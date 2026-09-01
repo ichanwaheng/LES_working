@@ -6,6 +6,7 @@ simulation:
   output_dir: cylinder_re3900/output
   save_interval: 50
   plot_interval: 50
+  gif_fps: 8
 
 # Re = U * D / nu = 3900  →  with U=1, D=1: nu = 1/3900
 physical:
