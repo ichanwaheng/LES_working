@@ -1,0 +1,5 @@
+{
+  "name": "LES/FSI membrane simulation",
+  "user": "ubuntu",
+  "install": "pip install --break-system-packages -r requirements.txt"
+}

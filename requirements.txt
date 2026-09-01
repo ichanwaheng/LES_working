@@ -1,0 +1,12 @@
+# Runtime dependencies for the LES/FSI membrane simulation code.
+# Pinned to compatible major versions; install with `pip install -r requirements.txt`.
+numpy>=1.26
+scipy>=1.11
+matplotlib>=3.8
+Pillow>=10.0
+openpyxl>=3.1
+h5py>=3.10
+PyYAML>=6.0
+
+# Notebook support for main.ipynb
+jupyter>=1.0
