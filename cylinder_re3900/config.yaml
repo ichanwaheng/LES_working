@@ -46,4 +46,4 @@ quick:
   dt: 0.005
   t_end: 2.0
   save_interval: 20
-  plot_interval: 20
+  plot_interval: 10   # denser frames for wake GIF

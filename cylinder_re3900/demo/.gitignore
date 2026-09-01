@@ -1,0 +1,4 @@
+# Keep demo GIF in git; ignore other local outputs here if any appear.
+*
+!.gitignore
+!cylinder_wake.gif
