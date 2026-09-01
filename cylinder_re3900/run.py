@@ -28,7 +28,7 @@ if str(HERE) not in sys.path:
 from cylinder import Cylinder
 from mesh import FluidGrid
 from piso import FluidSolver
-from viz import plot_force_history, plot_midplane, save_wake_gif
+from viz import plot_force_history, plot_midplane, save_wake_gif, wake_frames_from_dir
 
 
 def load_config(path: Path) -> dict:
@@ -234,9 +234,26 @@ def main() -> int:
     )
 
     gif_path = None
-    if not args.no_gif and wake_frames:
-        gif_path = save_wake_gif(wake_frames, out / "cylinder_wake.gif", fps=gif_fps)
-        print(f"[cylinder] wake GIF → {gif_path}  ({len(wake_frames)} frames @ {gif_fps} fps)")
+    if not args.no_gif:
+        frames_for_gif = [p for p in wake_frames if Path(p).is_file()]
+        if not frames_for_gif:
+            frames_for_gif = wake_frames_from_dir(out)
+        if frames_for_gif:
+            gif_path = save_wake_gif(
+                frames_for_gif, out / "cylinder_wake.gif", fps=gif_fps
+            )
+            # Tracked demo copy so the GIF is visible in the repo
+            demo_dir = HERE / "demo"
+            demo_dir.mkdir(parents=True, exist_ok=True)
+            demo_gif = demo_dir / "cylinder_wake.gif"
+            demo_gif.write_bytes(gif_path.read_bytes())
+            print(
+                f"[cylinder] wake GIF → {gif_path}  "
+                f"({len(frames_for_gif)} frames @ {gif_fps} fps)"
+            )
+            print(f"[cylinder] demo GIF → {demo_gif}")
+        else:
+            print("[cylinder] WARNING: no wake frames — GIF not written")
 
     np.savez_compressed(
         out / "final_state.npz",

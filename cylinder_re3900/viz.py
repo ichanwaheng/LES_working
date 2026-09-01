@@ -97,8 +97,13 @@ def save_wake_gif(
     frame_paths: list[str | Path],
     out_path: str | Path,
     fps: int = 8,
+    max_width: int = 900,
 ) -> Path:
-    """Assemble mid-plane wake PNGs into an animated GIF."""
+    """Assemble mid-plane wake PNGs into an animated GIF.
+
+    Uses a single shared palette so frames stay consistent (per-frame
+    adaptive palettes otherwise break the animation).
+    """
     from PIL import Image
 
     paths = [Path(p) for p in frame_paths if Path(p).is_file()]
@@ -107,17 +112,31 @@ def save_wake_gif(
 
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    frames = [Image.open(p).convert("P", palette=Image.ADAPTIVE) for p in paths]
-    duration_ms = max(int(1000 / max(fps, 1)), 20)
+
+    rgb = []
+    for p in paths:
+        im = Image.open(p).convert("RGB")
+        if max_width and im.width > max_width:
+            h = int(im.height * max_width / im.width)
+            im = im.resize((max_width, h), Image.Resampling.LANCZOS)
+        rgb.append(im)
+
+    palette_img = rgb[0].quantize(colors=256, method=Image.Quantize.MEDIANCUT)
+    frames = [palette_img] + [
+        im.quantize(colors=256, palette=palette_img) for im in rgb[1:]
+    ]
+    duration_ms = max(int(1000 / max(fps, 1)), 40)
     frames[0].save(
         out_path,
+        format="GIF",
         save_all=True,
         append_images=frames[1:],
         duration=duration_ms,
         loop=0,
         optimize=False,
+        disposal=2,
     )
-    for im in frames:
+    for im in rgb:
         im.close()
     return out_path
 
