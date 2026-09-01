@@ -323,9 +323,10 @@ class ContinuousMotionCapture:
     def _midplane_speed(self) -> np.ndarray:
         st = self.sim.fluid.state
         j = self.sim.grid.ny // 2
-        u = np.asarray(st.u[:, j, :], dtype=float)
-        v = np.asarray(st.v[:, j, :], dtype=float)
-        w = np.asarray(st.w[:, j, :], dtype=float)
+        uc, vc, wc = st.cell_centered_velocity()
+        u = np.asarray(uc[:, j, :], dtype=float)
+        v = np.asarray(vc[:, j, :], dtype=float)
+        w = np.asarray(wc[:, j, :], dtype=float)
         return np.sqrt(u * u + v * v + w * w)
 
     def _record(

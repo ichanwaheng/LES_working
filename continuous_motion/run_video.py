@@ -170,7 +170,7 @@ def main() -> int:
                 time=info["time"],
                 membrane_nodes=sim_obj.nodes,
                 membrane_elements=sim_obj.mesh.elements,
-                fluid_u=sim_obj.fluid.state.u,
+                fluid_u=sim_obj.fluid.state.cell_centered_velocity()[0],
                 meta={"stage": "continuous_motion"},
             )
 
