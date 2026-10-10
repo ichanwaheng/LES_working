@@ -60,6 +60,29 @@ def _upwind_1d(phi: np.ndarray, vel: np.ndarray, d: float, axis: int) -> np.ndar
     return out
 
 
+def _central_1d(phi: np.ndarray, d: float, axis: int) -> np.ndarray:
+    """Second-order central difference (preferred for laminar Re=150)."""
+    out = np.zeros_like(phi)
+    if axis == 0:
+        out[1:-1] = (phi[2:] - phi[:-2]) / (2.0 * d)
+        out[0] = (phi[1] - phi[0]) / d
+        out[-1] = (phi[-1] - phi[-2]) / d
+    else:
+        out[:, 1:-1] = (phi[:, 2:] - phi[:, :-2]) / (2.0 * d)
+        out[:, 0] = (phi[:, 1] - phi[:, 0]) / d
+        out[:, -1] = (phi[:, -1] - phi[:, -2]) / d
+    return out
+
+
+def _convective_grad(
+    phi: np.ndarray, vel: np.ndarray, d: float, axis: int, scheme: str
+) -> np.ndarray:
+    if scheme == "upwind":
+        return _upwind_1d(phi, vel, d, axis)
+    # default: central (low numerical diffusion for vortex shedding)
+    return _central_1d(phi, d, axis)
+
+
 class FluidSolver:
     """MAC-staggered laminar PISO for 2-D flow past a cylinder."""
 
@@ -71,6 +94,7 @@ class FluidSolver:
         U_inf: float = 1.0,
         u_clip: Optional[float] = None,
         n_correctors: int = 2,
+        conv_scheme: str = "central",
     ) -> None:
         self.grid = grid
         self.rho = float(rho)
@@ -78,6 +102,8 @@ class FluidSolver:
         self.U_inf = float(U_inf)
         self.u_clip = float(u_clip) if u_clip is not None else 8.0 * abs(self.U_inf)
         self.n_correctors = max(int(n_correctors), 1)
+        scheme = str(conv_scheme).lower().strip()
+        self.conv_scheme = scheme if scheme in ("central", "upwind") else "central"
         self.t = 0.0
 
         self.state = FluidState(
@@ -161,13 +187,21 @@ class FluidSolver:
     def _momentum_H_u(self, u, v) -> np.ndarray:
         g = self.grid
         v_u = self._interp_v_to_u(v)
-        conv = u * _upwind_1d(u, u, g.dx, 0) + v_u * _upwind_1d(u, v_u, g.dy, 1)
+        s = self.conv_scheme
+        conv = (
+            u * _convective_grad(u, u, g.dx, 0, s)
+            + v_u * _convective_grad(u, v_u, g.dy, 1, s)
+        )
         return -conv + self.nu * _laplacian_field(u, g.dx, g.dy)
 
     def _momentum_H_v(self, u, v) -> np.ndarray:
         g = self.grid
         u_v = self._interp_u_to_v(u)
-        conv = u_v * _upwind_1d(v, u_v, g.dx, 0) + v * _upwind_1d(v, v, g.dy, 1)
+        s = self.conv_scheme
+        conv = (
+            u_v * _convective_grad(v, u_v, g.dx, 0, s)
+            + v * _convective_grad(v, v, g.dy, 1, s)
+        )
         return -conv + self.nu * _laplacian_field(v, g.dx, g.dy)
 
     def _pressure_gradient_faces(self, p: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:

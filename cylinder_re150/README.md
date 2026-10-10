@@ -60,10 +60,12 @@ Config: `config.yaml` (`physical`, `domain`, `grid`, `time`, `solver`, `validati
 ## Method (short)
 
 - Incompressible 2-D Navier–Stokes, constant \(\nu = U D / \mathrm{Re}\)
-- MAC staggered grid; first-order upwind convection; explicit momentum
-- Issa PISO pressure–velocity coupling (implicit Poisson)
+- MAC staggered grid; **central** convection by default (upwind optional — more dissipative)
+- Explicit momentum + Issa PISO pressure–velocity coupling (implicit Poisson)
 - Immersed-boundary cylinder (stair-stepped zero-velocity faces)
 - Forces from pressure on a thin fluid band; \(S_t\) from lift peak period
+
+Central convection is important at Re = 150: first-order upwind on coarse grids adds enough numerical diffusion to suppress vortex shedding.
 
 ## References
 

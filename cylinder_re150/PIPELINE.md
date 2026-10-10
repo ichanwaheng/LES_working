@@ -44,7 +44,7 @@ uⁿ, vⁿ, pⁿ
    │
    ▼
 [1] Momentum predictor (explicit)
-       H(u) = −(u·∇)u + ν ∇²u
+       H(u) = −(u·∇)u + ν ∇²u   (central or upwind convection)
        u* = uⁿ + Δt (H(u) − ∇pⁿ/ρ)
        apply BC + IB
    │

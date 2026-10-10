@@ -128,12 +128,21 @@ def build_case(cfg: dict, quick: bool = False):
         nu=nu,
         U_inf=U,
         n_correctors=int(sol.get("piso_correctors", 2)),
+        conv_scheme=str(sol.get("conv_scheme", "central")),
     )
     fluid.set_immersed_boundary(mask)
 
-    # Seed a tiny asymmetry so the wake can shed
+    # Seed a clear cross-flow asymmetry so vortex shedding starts promptly
+    # (random noise alone is slow to amplify on coarse grids).
+    cy = float(dom["cy"])
+    cx = float(dom["cx"])
+    y_v = np.arange(grid.ny + 1) * grid.dy
+    Xv, Yv = np.meshgrid(grid.x, y_v, indexing="ij")
+    wake = (Xv > cx) & (Xv < cx + 4.0 * D) & (np.abs(Yv - cy) < 2.0 * D)
+    fluid.state.v[wake] += 0.05 * U * np.sin(np.pi * (Yv[wake] - cy) / (2.0 * D))
     rng = np.random.default_rng(0)
-    fluid.state.v += 1e-3 * U * rng.standard_normal(fluid.state.v.shape)
+    fluid.state.v += 2e-3 * U * rng.standard_normal(fluid.state.v.shape)
+    fluid.state.u, fluid.state.v = fluid._apply_bc(fluid.state.u, fluid.state.v)
 
     vcfg = cfg.get("validation", {})
     meta = {
