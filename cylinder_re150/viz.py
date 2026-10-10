@@ -79,18 +79,33 @@ def plot_force_history(
 
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig, ax = plt.subplots(figsize=(9, 3.8))
-    ax.plot(times, Cd, label="Cd", color="#8b3a2a")
-    ax.plot(times, Cl, label="Cl", color="#1f4e79")
+    times = np.asarray(times, dtype=float)
+    Cd = np.asarray(Cd, dtype=float)
+    Cl = np.asarray(Cl, dtype=float)
+
+    # Skip the impulsive start so the shedding signal is visible
+    t_cut = 2.0
+    mask = times >= t_cut if times.size and times[-1] > t_cut + 1.0 else np.ones_like(times, dtype=bool)
+    t_p, Cd_p, Cl_p = times[mask], Cd[mask], Cl[mask]
+
+    fig, axes = plt.subplots(2, 1, figsize=(9, 5.2), sharex=True)
+    axes[0].plot(t_p, Cd_p, label="Cd", color="#8b3a2a")
     if Cd_ref is not None:
-        ax.axhline(Cd_ref, color="#8b3a2a", ls="--", lw=1.0, alpha=0.7, label=f"Cd ref={Cd_ref}")
-    ax.set_xlabel("t U / D")
-    ax.set_ylabel("force coefficient")
+        axes[0].axhline(
+            Cd_ref, color="#8b3a2a", ls="--", lw=1.0, alpha=0.7, label=f"Cd ref={Cd_ref}"
+        )
+    axes[0].set_ylabel("Cd")
+    axes[0].legend(loc="best")
     title = "Laminar cylinder force history (Re=150)"
     if St_ref is not None:
-        title += f"  |  St_ref≈{St_ref}"
-    ax.set_title(title)
-    ax.legend(loc="best")
+        title += f"  |  St_ref≈{St_ref:g}"
+    axes[0].set_title(title)
+
+    axes[1].plot(t_p, Cl_p, label="Cl", color="#1f4e79")
+    axes[1].axhline(0.0, color="0.5", lw=0.8)
+    axes[1].set_xlabel("t U / D")
+    axes[1].set_ylabel("Cl")
+    axes[1].legend(loc="best")
     fig.tight_layout()
     fig.savefig(out_path, dpi=140)
     plt.close(fig)
