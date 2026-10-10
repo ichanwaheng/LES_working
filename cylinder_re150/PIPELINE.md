@@ -14,6 +14,10 @@ python3 run.py --quick
 python3 run.py
 python3 run.py --t-end 120 --gif-fps 8
 python3 run.py --no-gif
+
+# GIF only (from existing wake_t*.png)
+python3 make_gif.py --demo
+python3 make_gif.py --run-quick --demo
 ```
 
 ---

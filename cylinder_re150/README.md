@@ -31,6 +31,11 @@ python3 run.py --quick              # coarse grid, short time + GIF
 python3 run.py                      # config.yaml defaults (longer)
 python3 run.py --t-end 120 --gif-fps 8
 python3 run.py --no-gif
+
+# Build / rebuild GIF from existing wake_t*.png frames
+python3 make_gif.py
+python3 make_gif.py --out-dir output --fps 8 --every 2 --demo
+python3 make_gif.py --run-quick --demo   # short sim, then GIF
 ```
 
 Config: `config.yaml` (`physical`, `domain`, `grid`, `time`, `solver`, `validation`, `quick`).
