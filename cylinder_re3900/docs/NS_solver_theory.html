@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>From Navier-Stokes to the Discrete Solver</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css"/>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"
+  onload="renderMathInElement(document.body, {
+    delimiters: [
+      {left: '$$', right: '$$', display: true},
+      {left: '\\[', right: '\\]', display: true},
+      {left: '$', right: '$', display: false},
+      {left: '\\(', right: '\\)', display: false}
+    ]
+  });"></script>
+<style>
+  body { font-family: Georgia, 'Times New Roman', serif; max-width: 820px; margin: 2rem auto; padding: 0 1.25rem; line-height: 1.55; color: #1a1a1a; }
+  h1,h2,h3 { font-family: Helvetica, Arial, sans-serif; line-height: 1.25; }
+  h1 { font-size: 1.8rem; border-bottom: 2px solid #333; padding-bottom: .4rem; }
+  h2 { font-size: 1.35rem; margin-top: 2rem; }
+  h3 { font-size: 1.1rem; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: 0.95rem; }
+  th, td { border: 1px solid #ccc; padding: 0.45rem 0.6rem; text-align: left; vertical-align: top; }
+  th { background: #f3f3f3; }
+  code { background: #f5f5f5; padding: 0.1rem 0.3rem; border-radius: 3px; }
+  pre { background: #f5f5f5; padding: 0.8rem; overflow-x: auto; }
+  hr { border: none; border-top: 1px solid #ddd; margin: 2rem 0; }
+  .note { background: #f0f7ff; border: 1px solid #c5daf0; padding: 0.8rem 1rem; border-radius: 6px; }
+  @media print { body { max-width: none; } }
+</style>
+</head>
+<body>
+<div class="note"><strong>Tip:</strong> Open this file in any browser. Use File → Print → Save as PDF if you want a local PDF.</div>
+<h1>From Navier–Stokes to the Discrete Solver</h1>
+<h2>Explicit momentum and PISO pressure projection on a staggered grid</h2>
+<p>This note explains, from continuum theory to the fully discrete algorithm, how the cylinder flow solver advances the incompressible Navier–Stokes equations. No source code is included. The goal is that a reader can understand <em>what</em> is solved, <em>why</em> each step exists, and <em>how</em> time and space are discretised.</p>
+<hr/>
+<h2>1. Continuum starting point: incompressible Navier–Stokes</h2>
+<p>For a constant-density Newtonian fluid the unknowns are the velocity field \(\mathbf{u}=(u,v,w)\) and the pressure \(p\). They satisfy</p>
+<p><strong>Mass (continuity)</strong></p>
+<p>\[ \nabla\cdot\mathbf{u}=0. \]</p>
+<p><strong>Momentum</strong></p>
+<p>\[ \frac{\partial\mathbf{u}}{\partial t} +(\mathbf{u}\cdot\nabla)\mathbf{u} =-\frac{1}{\rho}\nabla p +\nu\nabla^{2}\mathbf{u}. \]</p>
+<p>Here \(\rho\) is density and \(\nu\) is kinematic viscosity. Pressure is not an independent thermodynamic equation of state: it is determined so that the velocity remains divergence-free.</p>
+<p>In components,</p>
+<p>\[ \begin{aligned} \partial_{t}u+u\partial_{x}u+v\partial_{y}u+w\partial_{z}u &=-\frac{1}{\rho}\partial_{x}p+\nu\nabla^{2}u,\\ \partial_{t}v+u\partial_{x}v+v\partial_{y}v+w\partial_{z}v &=-\frac{1}{\rho}\partial_{y}p+\nu\nabla^{2}v,\\ \partial_{t}w+u\partial_{x}w+v\partial_{y}w+w\partial_{z}w &=-\frac{1}{\rho}\partial_{z}p+\nu\nabla^{2}w. \end{aligned} \]</p>
+<p>These are the equations before any turbulence modelling.</p>
+<hr/>
+<h2>2. Large-eddy simulation (LES)</h2>
+<p>At Reynolds number \(\mathrm{Re}_{D}=U_{\infty}D/\nu=3900\), not all scales are resolved on an affordable grid. LES evolves only a spatially filtered (resolved) velocity \(\overline{\mathbf{u}}\). Filtering the nonlinear term produces an unclosed residual stress. The Smagorinsky model closes it with an eddy viscosity \(\nu_{t}\):</p>
+<p>\[ \overline{S}_{ij} =\frac12\Bigl( \partial_{j}\overline{u}_{i}+\partial_{i}\overline{u}_{j} \Bigr), \qquad |\overline{S}|=\sqrt{2\,\overline{S}_{ij}\overline{S}_{ij}}, \]</p>
+<p>\[ \nu_{t}=(C_{s}\Delta)^{2}\,|\overline{S}|, \qquad \Delta=(\Delta x\,\Delta y\,\Delta z)^{1/3}. \]</p>
+<p>The resolved momentum equation then has the same structure as Navier–Stokes with an effective viscosity</p>
+<p>\[ \nu_{\mathrm{eff}}=\nu+\nu_{t}. \]</p>
+<p>Below, overbars are dropped: \(\mathbf{u}\) and \(p\) mean the <strong>resolved</strong> LES fields, and \(\nu\) in the viscous term is replaced by \(\nu_{\mathrm{eff}}\) wherever LES is active.</p>
+<p><strong>Why LES here?</strong> The large wake eddies are intended to be resolved; \(\nu_{t}\) only represents the drain of energy to unresolved scales.</p>
+<hr/>
+<h2>3. Spatial discretisation: MAC staggered grid</h2>
+<h3>3.1 Arrangement of unknowns</h3>
+<p>The domain is a uniform Cartesian box divided into \(n_{x}\times n_{y}\times n_{z}\) cells of size \(\Delta x,\Delta y,\Delta z\).</p>
+<ul>
+<li>Pressure \(p\) (and \(\nu_{\mathrm{eff}}\)) live at <strong>cell centres</strong>.</li>
+<li>\(u\) lives on faces normal to \(x\) (one more plane in \(x\) than the number of cells).</li>
+<li>\(v\) lives on faces normal to \(y\).</li>
+<li>\(w\) lives on faces normal to \(z\).</li>
+</ul>
+<p>This Marker-and-Cell (MAC) staggering is chosen so that the discrete divergence of velocity and the discrete gradient of pressure act between neighbouring locations and largely avoid checkerboard pressure modes that appear on collocated grids.</p>
+<h3>3.2 Discrete divergence (at cell centres)</h3>
+<p>\[ (\nabla\cdot\mathbf{u})_{i,j,k} =\frac{u_{i+1/2}-u_{i-1/2}}{\Delta x} +\frac{v_{j+1/2}-v_{j-1/2}}{\Delta y} +\frac{w_{k+1/2}-w_{k-1/2}}{\Delta z}. \]</p>
+<h3>3.3 Discrete pressure gradient (on faces)</h3>
+<p>On an interior \(u\)-face,</p>
+<p>\[ (\partial_{x}p)_{i+1/2} =\frac{p_{i+1}-p_{i}}{\Delta x}, \]</p>
+<p>and likewise for \(y\) and \(z\) faces.</p>
+<h3>3.4 Convection: first-order upwind</h3>
+<p>The convective operator \((\mathbf{u}\cdot\nabla)\phi\) is approximated by first-order upwind differences: when the advecting speed is positive, the backward difference is used; when negative, the forward difference. On staggered faces, the three advecting components at a \(u\)-face are \(u\) itself and \(v,w\) interpolated from neighbouring faces (cyclic for \(v\)- and \(w\)-momentum).</p>
+<p><strong>Why upwind?</strong> It stabilises explicit advection. <strong>Cost:</strong> added numerical diffusion compared with central schemes.</p>
+<h3>3.5 Diffusion: seven-point Laplacian</h3>
+<p>Viscous terms use the standard second-order central Laplacian of each velocity component on its own staggered array, multiplied by the face value of \(\nu_{\mathrm{eff}}\) (obtained by averaging neighbouring cell-centre viscosities onto that face).</p>
+<h3>3.6 Explicit momentum residual without pressure</h3>
+<p>Collect convection and diffusion into</p>
+<p>\[ \mathbf{H}(\mathbf{u}) =-(\mathbf{u}\cdot\nabla)\mathbf{u} +\nu_{\mathrm{eff}}\nabla^{2}\mathbf{u}. \]</p>
+<p>Pressure is handled separately by the projection / PISO step below.</p>
+<h3>3.7 Staggered evaluation of \(|S|\) for LES</h3>
+<p>Normal strains \(S_{xx},S_{yy},S_{zz}\) are face jumps of velocity at cell centres. Shear strains are formed from face-tangential derivatives of the face velocities, then those derivative fields are averaged to centres. One does <strong>not</strong> average all three velocity components to the centre first and then differentiate for the LES closure used here.</p>
+<hr/>
+<h2>4. Time integration method</h2>
+<h3>4.1 What is used?</h3>
+<table>
+<tr><th>Part of the equation</th><th>Time treatment</th></tr>
+<tr><td>Convection</td><td><strong>Explicit</strong></td></tr>
+<tr><td>Viscous diffusion</td><td><strong>Explicit</strong></td></tr>
+<tr><td>Old pressure in the predictor</td><td><strong>Explicit</strong></td></tr>
+<tr><td>Pressure correction</td><td><strong>Implicit</strong> (Poisson solve)</td></tr>
+</table>
+<p>Overall: <strong>forward Euler (explicit) momentum</strong> combined with an <strong>implicit pressure Poisson</strong> inside a <strong>PISO</strong> (Pressure Implicit with Splitting of Operators) corrector loop.</p>
+<p>This is <strong>not</strong> Crank–Nicolson, Runge–Kutta, or a fully implicit coupled NS solve.</p>
+<h3>4.2 Explicit forward Euler for momentum</h3>
+<p>Given fields at time \(t^{n}\), the provisional velocity is</p>
+<p>\[ \mathbf{u}^{*} =\mathbf{u}^{n} +\Delta t\Biggl( \mathbf{H}(\mathbf{u}^{n}) -\frac{1}{\rho}\nabla p^{n} \Biggr). \]</p>
+<p>All terms on the right are known from time level \(n\). No linear system is solved for \(\mathbf{u}^{*}\). That is classical <strong>explicit</strong> integration, first-order accurate in time.</p>
+<p><strong>Stability implication.</strong> The step \(\Delta t\) must respect a CFL restriction for advection,</p>
+<p>\[ \mathrm{CFL}=\frac{U_{\max}\Delta t}{\min(\Delta x,\Delta y,\Delta z)}, \]</p>
+<p>and a viscous restriction when \(\nu_{\mathrm{eff}}\) is large (the implementation also caps \(\nu_{\mathrm{eff}}\) for that reason).</p>
+<h3>4.3 Why pressure cannot stay fully explicit</h3>
+<p>If one advanced velocity with an arbitrary pressure and never corrected it, \(\nabla\cdot\mathbf{u}\) would drift. Incompressibility requires that the end-of-step velocity satisfy</p>
+<p>\[ \nabla\cdot\mathbf{u}^{n+1}=0. \]</p>
+<p>That constraint determines a pressure correction through an elliptic equation, solved <strong>implicitly</strong>.</p>
+<hr/>
+<h2>5. From continuous projection idea to discrete PISO</h2>
+<h3>5.1 Projection idea</h3>
+<p>Write the update as a provisional velocity plus a pressure correction:</p>
+<p>\[ \mathbf{u}^{n+1} =\mathbf{u}^{*} -\frac{\Delta t}{\rho}\nabla p'. \]</p>
+<p>Taking the divergence and requiring \(\nabla\cdot\mathbf{u}^{n+1}=0\) yields the Poisson problem</p>
+<p>\[ \nabla^{2}p' =\frac{\rho}{\Delta t}\,\nabla\cdot\mathbf{u}^{*}. \]</p>
+<p>Solve for \(p'\), then correct \(\mathbf{u}^{*}\). This is the heart of fractional-step / projection methods.</p>
+<h3>5.2 PISO organisation (Issa)</h3>
+<p>PISO repeats the pressure–velocity correction \(N_{c}\) times (typically \(N_{c}=2\)). After the first corrector, the explicit residual \(\mathbf{H}\) is rebuilt from the latest velocity (neighbour / flux update) before forming a new provisional field and solving Poisson again. That reduces splitting error relative to a single projection with \(\mathbf{H}(\mathbf{u}^{n})\) frozen.</p>
+<h3>5.3 Discrete algorithm for one time step</h3>
+<p><strong>A. LES viscosities</strong></p>
+<p>From \(\mathbf{u}^{n}\), compute \(|S|\), \(\nu_{t}\), \(\nu_{\mathrm{eff}}\) at centres; interpolate \(\nu_{\mathrm{eff}}\) to faces.</p>
+<p><strong>B. Momentum predictor (explicit)</strong></p>
+<p>\[ \mathbf{u}^{*} =\mathbf{u}^{n} +\Delta t\Bigl( \mathbf{H}(\mathbf{u}^{n})-\tfrac{1}{\rho}\nabla p^{n} \Bigr), \]</p>
+<p>then impose boundary conditions and the immersed-cylinder condition (solid-adjacent faces set to zero velocity).</p>
+<p><strong>C. Corrector loop</strong> \(m=1,\ldots,N_{c}\)</p>
+<ol>
+<li>If \(m>1\): recompute \(\mathbf{H}\) from the current \(\mathbf{u}^{*}\), form a new provisional velocity from \(\mathbf{u}^{n}\) using the pressure accumulated so far, and re-apply boundary/immersed conditions.</li>
+<li>Evaluate \(d=\nabla\cdot\mathbf{u}^{*}\) at cell centres (set to zero in solid cells).</li>
+<li>Solve the discrete Poisson equation</li>
+<p>   \[    \nabla^{2}p'=\frac{\rho}{\Delta t}\,d    \]    with a seven-point Laplacian, Neumann-type treatment at the outer boundary, and a pinned reference cell to remove the additive null space. This solve is <strong>implicit</strong>.</p>
+<li>Correct face velocities:</li>
+<p>   \[    \mathbf{u}^{*}    \leftarrow    \mathbf{u}^{*}    -\frac{\Delta t}{\rho}\nabla p'.    \]</p>
+<li>Update pressure: \(p\leftarrow p+p'\).</li>
+<li>Re-apply boundary and immersed conditions.</li>
+</ul>
+<p><strong>D. Accept the new time level</strong></p>
+<p>\[ \mathbf{u}^{n+1}=\mathbf{u}^{*},\qquad p^{n+1}=p-\langle p\rangle \]</p>
+<p>(mean pressure removed; only \(\nabla p\) matters).</p>
+<hr/>
+<h2>6. Boundary and obstacle treatment (conceptual)</h2>
+<ul>
+<li><strong>Inlet:</strong> prescribed freestream velocity.</li>
+<li><strong>Outlet:</strong> homogeneous Neumann (zero streamwise derivative) on velocity.</li>
+<li><strong>Far lateral boundaries:</strong> freestream / slip-type conditions appropriate to external flow (not a viscous channel).</li>
+<li><strong>Cylinder:</strong> Cartesian immersed mask; faces touching solid cells carry zero velocity (stationary body).</li>
+</ul>
+<p>These conditions are enforced after the predictor and after each velocity correction so that the discrete fields remain consistent with the geometry.</p>
+<hr/>
+<h2>7. What “solving the discretised NS equations” means in practice</h2>
+<p>Putting the pieces together:</p>
+<ol>
+<li>Start from continuum incompressible NS.</li>
+<li>Replace \(\nu\) by \(\nu_{\mathrm{eff}}(\mathbf{u})\) from Smagorinsky LES.</li>
+<li>Replace derivatives by staggered finite differences (upwind convection, central Laplacian, face–centre divergence and gradient).</li>
+<li>Advance time by <strong>explicit forward Euler</strong> on the momentum residual \(\mathbf{H}-\nabla p/\rho\).</li>
+<li>Enforce incompressibility by <strong>implicitly</strong> solving a pressure Poisson equation and correcting the face velocities, repeated in a <strong>PISO</strong> loop.</li>
+</ul>
+<p>So the discrete system is not solved as one giant fully implicit nonlinear system for \((\mathbf{u}^{n+1},p^{n+1})\). It is solved as a <strong>split</strong> scheme: cheap explicit momentum update, then elliptic pressure solves that restore discrete mass conservation.</p>
+<hr/>
+<h2>8. One-line summary</h2>
+<p><strong>Discretisation:</strong> MAC staggered finite differences with first-order upwind convection and central viscous fluxes, plus Smagorinsky \(\nu_{t}\).   <strong>Time integration:</strong> explicit forward Euler for momentum; implicit Poisson pressure corrections in a PISO loop.</p>
+</body>
+</html>
