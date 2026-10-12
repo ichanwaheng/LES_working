@@ -1,36 +1,40 @@
 #!/usr/bin/env python3
-"""Visualise BL-derived cell spacings for the cylinder mesh."""
+"""Visualise geometry + mesh after BL meshing, before analysis.
+
+Writes:
+  - mesh_geometry.png  — domain mesh + cylinder (and zoom)
+  - mesh_spacing.png   — Δx(x), Δy(y)
+
+Usage
+-----
+    cd cylinder_re150
+    python3 plot_mesh.py --quick
+    python3 plot_mesh.py                 # production mesh inputs
+    python3 run.py --mesh-only --quick   # same, via the solver driver
+"""
 
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
-import numpy as np
 import yaml
 
 HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
+from cylinder import Cylinder
 from mesh import FluidGrid
+from viz import plot_mesh_geometry, plot_mesh_spacing
 
 
-def main() -> int:
-    p = argparse.ArgumentParser(description="Plot BL mesh spacings")
-    p.add_argument("-c", "--config", default=str(HERE / "config.yaml"))
-    p.add_argument("--quick", action="store_true")
-    p.add_argument(
-        "--out",
-        default=str(HERE / "output" / "mesh_spacing.png"),
-    )
-    args = p.parse_args()
-
-    cfg = yaml.safe_load(Path(args.config).read_text(encoding="utf-8"))
+def build_mesh_from_config(cfg: dict, quick: bool = False):
     phys, dom = cfg["physical"], cfg["domain"]
     mcfg = dict(cfg.get("mesh", {}))
-    if args.quick:
+    if quick:
         q = cfg.get("quick", {})
         for k in ("n_bl", "growth", "h_far"):
             if k in q:
@@ -47,35 +51,73 @@ def main() -> int:
         n_bl=int(mcfg.get("n_bl", 15)),
         growth=float(mcfg.get("growth", 1.15)),
         h_far=float(h_far) if h_far is not None else None,
+        verbose=True,
     )
+    cyl = Cylinder(
+        D=float(phys["D"]),
+        cx=float(dom["cx"]),
+        cy=float(dom["cy"]),
+    )
+    mask = cyl.cell_mask(grid)
+    return grid, cyl, mask
 
-    import matplotlib
 
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+def main() -> int:
+    p = argparse.ArgumentParser(
+        description="Show meshed cylinder geometry before analysis"
+    )
+    p.add_argument("-c", "--config", default=str(HERE / "config.yaml"))
+    p.add_argument("--quick", action="store_true")
+    p.add_argument(
+        "--out-dir",
+        type=str,
+        default=None,
+        help="Output folder (default: <config output_dir>)",
+    )
+    args = p.parse_args()
 
-    out = Path(args.out)
-    out.parent.mkdir(parents=True, exist_ok=True)
+    cfg = yaml.safe_load(Path(args.config).read_text(encoding="utf-8"))
+    grid, cyl, mask = build_mesh_from_config(cfg, quick=args.quick)
 
-    fig, axes = plt.subplots(2, 1, figsize=(10, 6), sharex=False)
-    axes[0].plot(grid.x, grid.dx_c, color="#1f4e79", lw=1.2)
-    axes[0].axvline(dom["cx"] - 0.5 * phys["D"], color="k", ls="--", lw=0.8)
-    axes[0].axvline(dom["cx"] + 0.5 * phys["D"], color="k", ls="--", lw=0.8)
-    axes[0].set_ylabel("Δx")
-    axes[0].set_xlabel("x")
-    axes[0].set_title("Streamwise cell size (BL packing at cylinder walls)")
+    if args.out_dir:
+        out = Path(args.out_dir)
+        if not out.is_absolute():
+            out = (HERE / out).resolve()
+    else:
+        out = Path(cfg["simulation"]["output_dir"])
+        if not out.is_absolute():
+            if out.parts and out.parts[0] == "cylinder_re150":
+                out = (HERE.parent / out).resolve()
+            else:
+                out = (HERE / out).resolve()
+    out.mkdir(parents=True, exist_ok=True)
 
-    axes[1].plot(grid.y, grid.dy_c, color="#8b3a2a", lw=1.2)
-    axes[1].axvline(dom["cy"] - 0.5 * phys["D"], color="k", ls="--", lw=0.8)
-    axes[1].axvline(dom["cy"] + 0.5 * phys["D"], color="k", ls="--", lw=0.8)
-    axes[1].set_ylabel("Δy")
-    axes[1].set_xlabel("y")
-    axes[1].set_title("Cross-stream cell size")
+    geo = plot_mesh_geometry(
+        grid,
+        mask,
+        out / "mesh_geometry.png",
+        cylinder=cyl,
+        title="Meshed geometry (before analysis)",
+    )
+    sp = plot_mesh_spacing(
+        grid,
+        out / "mesh_spacing.png",
+        cx=cyl.cx,
+        cy=cyl.cy,
+        R=cyl.R,
+    )
+    if grid.mesh_info is not None:
+        (out / "mesh_report.json").write_text(
+            json.dumps(grid.mesh_info, indent=2), encoding="utf-8"
+        )
 
-    fig.tight_layout()
-    fig.savefig(out, dpi=140)
-    plt.close(fig)
-    print(f"[plot_mesh] wrote {out}")
+    print(f"[plot_mesh] geometry → {geo}")
+    print(f"[plot_mesh] spacing  → {sp}")
+    print(
+        f"[plot_mesh] {grid.nx}×{grid.ny} cells, "
+        f"solid={int(mask.sum())}  "
+        f"(no flow solve — inspect mesh before analysis)"
+    )
     return 0
 
 

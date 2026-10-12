@@ -1,10 +1,164 @@
-"""Wake plots and force history for the laminar cylinder case."""
+"""Wake plots, mesh geometry, and force history for the laminar cylinder case."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
 import numpy as np
+
+
+def plot_mesh_geometry(
+    grid,
+    solid_mask: np.ndarray,
+    out_path: str | Path,
+    cylinder=None,
+    title: str = "Mesh geometry (pre-analysis)",
+    max_lines: int = 400,
+    zoom: bool = True,
+) -> Path:
+    """Draw the meshed domain with cylinder / solid cells before analysis.
+
+    Writes a full-domain view and (if ``zoom``) a close-up around the cylinder
+    so wall clustering is visible.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.collections import LineCollection
+
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    x_f = np.asarray(grid.x_u, dtype=float)
+    y_f = np.asarray(grid.y_v, dtype=float)
+    nx, ny = grid.nx, grid.ny
+
+    # Subsample line drawing on very fine meshes for readable PNGs
+    stride_x = max(1, int(np.ceil(nx / max_lines)))
+    stride_y = max(1, int(np.ceil(ny / max_lines)))
+
+    def _grid_segments():
+        segs = []
+        # vertical faces (constant x)
+        for i in range(0, nx + 1, stride_x):
+            segs.append([(x_f[i], y_f[0]), (x_f[i], y_f[-1])])
+        if (nx % stride_x) != 0:
+            segs.append([(x_f[-1], y_f[0]), (x_f[-1], y_f[-1])])
+        # horizontal faces (constant y)
+        for j in range(0, ny + 1, stride_y):
+            segs.append([(x_f[0], y_f[j]), (x_f[-1], y_f[j])])
+        if (ny % stride_y) != 0:
+            segs.append([(x_f[0], y_f[-1]), (x_f[-1], y_f[-1])])
+        return segs
+
+    def _draw(ax, xlim=None, ylim=None, show_every_line: bool = False):
+        if show_every_line and xlim is not None and ylim is not None:
+            # In zoom window, draw all lines that intersect the box
+            segs = []
+            for i in range(nx + 1):
+                if xlim[0] <= x_f[i] <= xlim[1]:
+                    segs.append([(x_f[i], max(y_f[0], ylim[0])), (x_f[i], min(y_f[-1], ylim[1]))])
+            for j in range(ny + 1):
+                if ylim[0] <= y_f[j] <= ylim[1]:
+                    segs.append([(max(x_f[0], xlim[0]), y_f[j]), (min(x_f[-1], xlim[1]), y_f[j])])
+        else:
+            segs = _grid_segments()
+        ax.add_collection(
+            LineCollection(segs, colors="#6b7c8a", linewidths=0.35, alpha=0.85)
+        )
+        # Solid IB cells
+        if solid_mask is not None and np.any(solid_mask):
+            ax.scatter(
+                grid.X[solid_mask],
+                grid.Y[solid_mask],
+                s=6,
+                c="#c45c26",
+                marker="s",
+                linewidths=0,
+                label="solid cells",
+                zorder=3,
+            )
+        if cylinder is not None:
+            theta = np.linspace(0, 2 * np.pi, 256)
+            ax.plot(
+                cylinder.cx + cylinder.R * np.cos(theta),
+                cylinder.cy + cylinder.R * np.sin(theta),
+                color="k",
+                lw=1.8,
+                label="cylinder",
+                zorder=4,
+            )
+            ax.plot(cylinder.cx, cylinder.cy, "k+", ms=8, zorder=4)
+        ax.set_aspect("equal", adjustable="box")
+        ax.set_xlabel("x / D")
+        ax.set_ylabel("y / D")
+        if xlim is not None:
+            ax.set_xlim(*xlim)
+        else:
+            ax.set_xlim(x_f[0], x_f[-1])
+        if ylim is not None:
+            ax.set_ylim(*ylim)
+        else:
+            ax.set_ylim(y_f[0], y_f[-1])
+        ax.legend(loc="upper right", fontsize=8)
+
+    n_panels = 2 if zoom and cylinder is not None else 1
+    fig, axes = plt.subplots(
+        1, n_panels, figsize=(7 * n_panels, 6.2), squeeze=False
+    )
+    ax0 = axes[0, 0]
+    _draw(ax0)
+    ax0.set_title(f"{title}\n{nx}×{ny} cells  (lines every {stride_x}/{stride_y})")
+
+    if n_panels == 2:
+        ax1 = axes[0, 1]
+        pad = 1.5 * cylinder.D
+        xlim = (cylinder.cx - pad, cylinder.cx + pad)
+        ylim = (cylinder.cy - pad, cylinder.cy + pad)
+        _draw(ax1, xlim=xlim, ylim=ylim, show_every_line=True)
+        ax1.set_title("Zoom near cylinder (all mesh lines)")
+
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=160)
+    plt.close(fig)
+    return out_path
+
+
+def plot_mesh_spacing(
+    grid,
+    out_path: str | Path,
+    cx: float | None = None,
+    cy: float | None = None,
+    R: float | None = None,
+) -> Path:
+    """Plot Δx(x) and Δy(y) after BL meshing."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig, axes = plt.subplots(2, 1, figsize=(10, 6), sharex=False)
+    axes[0].plot(grid.x, grid.dx_c, color="#1f4e79", lw=1.2)
+    axes[0].set_ylabel("Δx")
+    axes[0].set_xlabel("x")
+    axes[0].set_title("Streamwise cell size after meshing")
+    axes[1].plot(grid.y, grid.dy_c, color="#8b3a2a", lw=1.2)
+    axes[1].set_ylabel("Δy")
+    axes[1].set_xlabel("y")
+    axes[1].set_title("Cross-stream cell size after meshing")
+    if cx is not None and R is not None:
+        axes[0].axvline(cx - R, color="k", ls="--", lw=0.8)
+        axes[0].axvline(cx + R, color="k", ls="--", lw=0.8)
+    if cy is not None and R is not None:
+        axes[1].axvline(cy - R, color="k", ls="--", lw=0.8)
+        axes[1].axvline(cy + R, color="k", ls="--", lw=0.8)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=140)
+    plt.close(fig)
+    return out_path
 
 
 def plot_wake(

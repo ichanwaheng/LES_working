@@ -27,15 +27,21 @@ NASA Wind-US runs A–D reported \(C_D \approx 1.68\)–\(1.80\) and \(S_t \appr
 
 ```bash
 cd cylinder_re150
-python3 run.py --quick              # coarse grid, short time + GIF
-python3 run.py                      # config.yaml defaults (longer)
+
+# Inspect mesh + cylinder geometry BEFORE analysis
+python3 plot_mesh.py --quick
+python3 run.py --mesh-only --quick
+
+# Full solve (also writes mesh_geometry.png first)
+python3 run.py --quick
+python3 run.py
 python3 run.py --t-end 120 --gif-fps 8
 python3 run.py --no-gif
 
 # Build / rebuild GIF from existing wake_t*.png frames
 python3 make_gif.py
 python3 make_gif.py --out-dir output --fps 8 --every 2 --demo
-python3 make_gif.py --run-quick --demo   # short sim, then GIF
+python3 make_gif.py --run-quick --demo
 ```
 
 Config: `config.yaml` (`physical`, `domain`, `mesh`, `time`, `solver`, `validation`, `quick`).

@@ -39,7 +39,14 @@ from validate import (
     validate_history,
     write_report,
 )
-from viz import plot_force_history, plot_wake, save_wake_gif, wake_frames_from_dir
+from viz import (
+    plot_force_history,
+    plot_mesh_geometry,
+    plot_mesh_spacing,
+    plot_wake,
+    save_wake_gif,
+    wake_frames_from_dir,
+)
 
 
 def load_config(path: Path) -> dict:
@@ -81,6 +88,11 @@ def parse_args():
         "--no-gif",
         action="store_true",
         help="Skip writing wake GIF at the end",
+    )
+    p.add_argument(
+        "--mesh-only",
+        action="store_true",
+        help="Build mesh, write geometry plots, then exit (no flow solve)",
     )
     args, _ = p.parse_known_args()
     return args
@@ -218,6 +230,28 @@ def main() -> int:
         (out / "mesh_report.json").write_text(
             json.dumps(grid.mesh_info, indent=2), encoding="utf-8"
         )
+
+    # Always write mesh geometry before analysis so the grid can be inspected
+    geo_path = plot_mesh_geometry(
+        grid,
+        mask,
+        out / "mesh_geometry.png",
+        cylinder=cyl,
+        title="Meshed geometry (before analysis)",
+    )
+    sp_path = plot_mesh_spacing(
+        grid,
+        out / "mesh_spacing.png",
+        cx=cyl.cx,
+        cy=cyl.cy,
+        R=cyl.R,
+    )
+    print(f"[cylinder_re150] mesh geometry → {geo_path}")
+    print(f"[cylinder_re150] mesh spacing  → {sp_path}")
+
+    if args.mesh_only:
+        print("[cylinder_re150] --mesh-only: stopping before flow analysis")
+        return 0
 
     hist_path = out / "force_history.csv"
     times, Cds, Cls = [], [], []
