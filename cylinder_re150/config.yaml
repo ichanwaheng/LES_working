@@ -23,34 +23,40 @@ domain:
   cx: 6.0          # cylinder centre x
   cy: 6.0          # cylinder centre y (mid-channel)
 
-grid:
-  nx: 240
-  ny: 120
+# Mesh is derived from BL theory — do NOT prescribe nx, ny.
+# 1) δ = D/√Re
+# 2) n_bl cells in the BL (input, typical 15–30)
+# 3) growth rate (input, typical 1.05–1.2)
+# 4) Δ_k = Δ₁ * growth^(k-1) spanning δ
+# 5) outer fluid cell size = Δ_max (largest BL cell), unless h_far override
+mesh:
+  n_bl: 12
+  growth: 1.20
+  # h_far omitted → outer spacing = Δ_max (theory). Expect O(10^6) cells.
+  # For a lighter production mesh you may set e.g. h_far: 0.05
 
 time:
-  dt: 0.003
-  t_end: 100.0     # convective times — need several shedding periods
+  dt: 0.002
+  t_end: 100.0
   cfl_max: 0.5
 
 solver:
   piso_correctors: 2
-  # central: low numerical diffusion (needed for Re=150 shedding)
-  # upwind: more stable but damps vortices on coarse grids
   conv_scheme: central
 
 validation:
-  # Experimental / literature targets cited by NASA Study #1
   Cd_exp: 1.78
   St_exp_lo: 0.179
   St_exp_hi: 0.182
-  # Average forces after this fraction of t_end
   settle_fraction: 0.60
 
 # Coarse override used by: python run.py --quick
+# h_far > Δ_max only for a fast smoke test (outer domain coarsened)
 quick:
-  nx: 120
-  ny: 60
-  dt: 0.008
-  t_end: 40.0
-  save_interval: 25
-  plot_interval: 25
+  n_bl: 8
+  growth: 1.25
+  h_far: 0.10          # > Δ_max: coarsens only the outer domain for smoke tests
+  dt: 0.0003           # limited by Δ₁ (wall) CFL on stretched mesh
+  t_end: 2.0
+  save_interval: 100
+  plot_interval: 100

@@ -27,9 +27,15 @@ class Cylinder:
         return r2 <= self.R**2
 
     def surface_band(self, grid: FluidGrid, n_cells: float = 1.5) -> np.ndarray:
-        """Fluid cells within ``n_cells`` of the cylinder surface (force sampling)."""
+        """Fluid cells in a thin shell outside the cylinder (force sampling).
+
+        Thickness is at least ``n_cells * Δ_min``, but never thinner than a
+        small fraction of ``D``, so highly stretched wall meshes still yield
+        enough sample cells.
+        """
         r = np.sqrt((grid.X - self.cx) ** 2 + (grid.Y - self.cy) ** 2)
-        band = n_cells * min(grid.dx, grid.dy)
+        h_min = float(min(np.min(grid.dx_c), np.min(grid.dy_c)))
+        band = max(n_cells * h_min, 0.05 * self.D, 3.0 * h_min)
         solid = r <= self.R
         near = (r > self.R) & (r <= self.R + band)
         return near & ~solid

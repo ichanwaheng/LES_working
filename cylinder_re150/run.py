@@ -39,7 +39,14 @@ from validate import (
     validate_history,
     write_report,
 )
-from viz import plot_force_history, plot_wake, save_wake_gif, wake_frames_from_dir
+from viz import (
+    plot_force_history,
+    plot_mesh_geometry,
+    plot_mesh_spacing,
+    plot_wake,
+    save_wake_gif,
+    wake_frames_from_dir,
+)
 
 
 def load_config(path: Path) -> dict:
@@ -82,6 +89,11 @@ def parse_args():
         action="store_true",
         help="Skip writing wake GIF at the end",
     )
+    p.add_argument(
+        "--mesh-only",
+        action="store_true",
+        help="Build mesh, write geometry plots, then exit (no flow solve)",
+    )
     args, _ = p.parse_known_args()
     return args
 
@@ -89,16 +101,16 @@ def parse_args():
 def build_case(cfg: dict, quick: bool = False):
     phys = cfg["physical"]
     dom = cfg["domain"]
-    grd = dict(cfg["grid"])
+    mcfg = dict(cfg.get("mesh", {}))
     tcfg = dict(cfg["time"])
     scfg = dict(cfg["simulation"])
     sol = cfg.get("solver", {})
 
     if quick:
         q = cfg.get("quick", {})
-        for k in ("nx", "ny"):
+        for k in ("n_bl", "growth", "h_far"):
             if k in q:
-                grd[k] = int(q[k])
+                mcfg[k] = q[k]
         for k in ("dt", "t_end"):
             if k in q:
                 tcfg[k] = float(q[k])
@@ -112,15 +124,35 @@ def build_case(cfg: dict, quick: bool = False):
     nu = U * D / Re
     rho = float(phys.get("rho", 1.0))
 
-    grid = FluidGrid(
+    h_far = mcfg.get("h_far", None)
+    if h_far is not None:
+        h_far = float(h_far)
+
+    grid = FluidGrid.from_boundary_layer(
         L=float(dom["L"]),
         W=float(dom["W"]),
-        nx=int(grd["nx"]),
-        ny=int(grd["ny"]),
+        cx=float(dom["cx"]),
+        cy=float(dom["cy"]),
+        D=D,
+        Re=Re,
+        n_bl=int(mcfg.get("n_bl", 15)),
+        growth=float(mcfg.get("growth", 1.15)),
+        h_far=h_far,
+        verbose=True,
     )
     cyl = Cylinder(D=D, cx=float(dom["cx"]), cy=float(dom["cy"]))
     mask = cyl.cell_mask(grid)
     band = cyl.surface_band(grid, n_cells=1.5)
+
+    # Keep explicit dt inside a safe CFL envelope based on Δ₁
+    cfl_max = float(tcfg.get("cfl_max", 0.5))
+    dt_cfl = cfl_max * min(grid.dx, grid.dy) / max(abs(U) * 2.0, 1e-12)
+    if float(tcfg["dt"]) > dt_cfl:
+        print(
+            f"[cylinder_re150] reducing dt {tcfg['dt']} → {dt_cfl:.6e} "
+            f"for CFL≤{cfl_max} on Δ_min={min(grid.dx, grid.dy):.4e}"
+        )
+        tcfg["dt"] = dt_cfl
 
     fluid = FluidSolver(
         grid,
@@ -133,11 +165,9 @@ def build_case(cfg: dict, quick: bool = False):
     fluid.set_immersed_boundary(mask)
 
     # Seed a clear cross-flow asymmetry so vortex shedding starts promptly
-    # (random noise alone is slow to amplify on coarse grids).
     cy = float(dom["cy"])
     cx = float(dom["cx"])
-    y_v = np.arange(grid.ny + 1) * grid.dy
-    Xv, Yv = np.meshgrid(grid.x, y_v, indexing="ij")
+    Xv, Yv = np.meshgrid(grid.x, grid.y_v, indexing="ij")
     wake = (Xv > cx) & (Xv < cx + 4.0 * D) & (np.abs(Yv - cy) < 2.0 * D)
     fluid.state.v[wake] += 0.05 * U * np.sin(np.pi * (Yv[wake] - cy) / (2.0 * D))
     rng = np.random.default_rng(0)
@@ -156,6 +186,7 @@ def build_case(cfg: dict, quick: bool = False):
         "plot_interval": int(scfg.get("plot_interval", 50)),
         "cfl_max": float(tcfg.get("cfl_max", 0.5)),
         "settle_fraction": float(vcfg.get("settle_fraction", 0.60)),
+        "mesh": grid.mesh_info,
     }
     return grid, cyl, mask, band, fluid, meta
 
@@ -186,12 +217,41 @@ def main() -> int:
     print(
         f"[cylinder_re150] Re={meta['Re']:g}  D={D:g}  U={U:g}  nu={meta['nu']:.6e}\n"
         f"[cylinder_re150] grid {grid.nx}x{grid.ny}  "
-        f"dx={grid.dx:.4f} dy={grid.dy:.4f}\n"
+        f"dx_min={grid.dx:.4e} dy_min={grid.dy:.4e}  "
+        f"dx_max={float(np.max(grid.dx_c)):.4e} dy_max={float(np.max(grid.dy_c)):.4e}\n"
         f"[cylinder_re150] solid cells={int(mask.sum())}  "
         f"dt={dt:g}  steps={n_steps}  t_end={t_end:g}\n"
         f"[cylinder_re150] NASA Study #1 targets: Cd≈{CD_EXP}, St≈{ST_EXP_MID:.3f}\n"
         f"[cylinder_re150] output → {out}"
     )
+    if grid.mesh_info is not None:
+        import json
+
+        (out / "mesh_report.json").write_text(
+            json.dumps(grid.mesh_info, indent=2), encoding="utf-8"
+        )
+
+    # Always write mesh geometry before analysis so the grid can be inspected
+    geo_path = plot_mesh_geometry(
+        grid,
+        mask,
+        out / "mesh_geometry.png",
+        cylinder=cyl,
+        title="Meshed geometry (before analysis)",
+    )
+    sp_path = plot_mesh_spacing(
+        grid,
+        out / "mesh_spacing.png",
+        cx=cyl.cx,
+        cy=cyl.cy,
+        R=cyl.R,
+    )
+    print(f"[cylinder_re150] mesh geometry → {geo_path}")
+    print(f"[cylinder_re150] mesh spacing  → {sp_path}")
+
+    if args.mesh_only:
+        print("[cylinder_re150] --mesh-only: stopping before flow analysis")
+        return 0
 
     hist_path = out / "force_history.csv"
     times, Cds, Cls = [], [], []

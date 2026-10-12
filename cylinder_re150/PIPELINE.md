@@ -25,13 +25,17 @@ python3 make_gif.py --run-quick --demo
 ## 2. Module pipeline
 
 ```text
-config.yaml
+config.yaml  (mesh.n_bl, mesh.growth [, mesh.h_far])
+    │
+    ▼
+mesh_sizing.BoundaryLayerSizing
+    δ=D/√Re → Δ₁…Δ_max → line spacings at cylinder walls
     │
     ▼
 run.py
-    ├─ mesh.FluidGrid          MAC staggered 2-D box
-    ├─ cylinder.Cylinder       mask + surface band
-    ├─ piso.FluidSolver        NS + PISO (laminar)
+    ├─ mesh.FluidGrid.from_boundary_layer   stretched MAC box
+    ├─ cylinder.Cylinder                    mask + surface band
+    ├─ piso.FluidSolver                     NS + PISO (variable Δ)
     └─ time loop
             ├─ fluid.step(dt)
             ├─ force_coefficients

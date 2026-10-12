@@ -6,10 +6,12 @@ https://www.grc.nasa.gov/www/wind/valid/lamcyl/Study1_files/Study1.html
 
 from cylinder import Cylinder
 from mesh import FluidGrid
+from mesh_sizing import BoundaryLayerSizing
 from piso import FluidSolver, FluidState
 from validate import ValidationReport, validate_history
 
 __all__ = [
+    "BoundaryLayerSizing",
     "Cylinder",
     "FluidGrid",
     "FluidSolver",
