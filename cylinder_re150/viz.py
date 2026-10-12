@@ -25,8 +25,9 @@ def plot_wake(
 
     uc, vc = state.cell_centered_velocity()
     speed = np.sqrt(uc * uc + vc * vc)
-    dudy = np.gradient(uc, grid.dy, axis=1, edge_order=1)
-    dvdx = np.gradient(vc, grid.dx, axis=0, edge_order=1)
+    # Variable-spacing gradients along cell-centre coordinates
+    dudy = np.gradient(uc, grid.y, axis=1, edge_order=1)
+    dvdx = np.gradient(vc, grid.x, axis=0, edge_order=1)
     omega = dvdx - dudy
     solid = solid_mask
     speed = np.ma.array(speed, mask=solid)

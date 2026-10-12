@@ -38,7 +38,18 @@ python3 make_gif.py --out-dir output --fps 8 --every 2 --demo
 python3 make_gif.py --run-quick --demo   # short sim, then GIF
 ```
 
-Config: `config.yaml` (`physical`, `domain`, `grid`, `time`, `solver`, `validation`, `quick`).
+Config: `config.yaml` (`physical`, `domain`, `mesh`, `time`, `solver`, `validation`, `quick`).
+
+### Mesh inputs (not `nx`, `ny`)
+
+| Input | Meaning | Typical |
+|-------|---------|---------|
+| `mesh.n_bl` | cells inside the BL | 15–30 |
+| `mesh.growth` | geometric growth rate | 1.05–1.2 |
+| `mesh.h_far` | optional outer size (default = `Δ_max`) | — |
+
+Sizing rule: ``δ = D/√Re`` → geometric series of `n_bl` cells → outer fluid uses `Δ_max`.
+Cell counts `nx`, `ny` are **computed**. See `mesh_sizing.py` and `python3 plot_mesh.py`.
 
 ## Outputs
 

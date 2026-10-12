@@ -1,5 +1,7 @@
 """2-D incompressible Navier–Stokes on a MAC staggered grid — laminar PISO.
 
+Supports non-uniform cell widths from boundary-layer mesh sizing.
+
 External-flow BCs for a cylinder in a box:
 - inlet (west): uniform ``U_inf``
 - outlet (east): Neumann
@@ -30,57 +32,97 @@ class FluidState:
         return uc, vc
 
 
-def _laplacian_field(phi: np.ndarray, dx: float, dy: float) -> np.ndarray:
+def _laplacian_variable(
+    phi: np.ndarray,
+    d_centre_x: np.ndarray,
+    d_centre_y: np.ndarray,
+) -> np.ndarray:
+    """Five-point Laplacian on a rectilinear (possibly stretched) grid."""
     lap = np.zeros_like(phi)
-    if phi.shape[0] > 1:
-        lap[1:-1] += (phi[2:] - 2 * phi[1:-1] + phi[0:-2]) / dx**2
-        lap[0] += (phi[1] - phi[0]) / dx**2
-        lap[-1] += (phi[-2] - phi[-1]) / dx**2
-    if phi.shape[1] > 1:
-        lap[:, 1:-1] += (phi[:, 2:] - 2 * phi[:, 1:-1] + phi[:, 0:-2]) / dy**2
-        lap[:, 0] += (phi[:, 1] - phi[:, 0]) / dy**2
-        lap[:, -1] += (phi[:, -2] - phi[:, -1]) / dy**2
+    nx, ny = phi.shape
+
+    if nx > 1 and d_centre_x.size >= 1:
+        hm = d_centre_x[:-1, None]
+        hp = d_centre_x[1:, None]
+        if nx > 2:
+            lap[1:-1, :] += (
+                2.0
+                * (
+                    (phi[2:, :] - phi[1:-1, :]) / hp
+                    - (phi[1:-1, :] - phi[:-2, :]) / hm
+                )
+                / (hm + hp)
+            )
+        h0 = float(d_centre_x[0])
+        lap[0, :] += (phi[1, :] - phi[0, :]) / (h0 * h0)
+        hN = float(d_centre_x[-1])
+        lap[-1, :] += (phi[-2, :] - phi[-1, :]) / (hN * hN)
+
+    if ny > 1 and d_centre_y.size >= 1:
+        hm = d_centre_y[:-1][None, :]
+        hp = d_centre_y[1:][None, :]
+        if ny > 2:
+            lap[:, 1:-1] += (
+                2.0
+                * (
+                    (phi[:, 2:] - phi[:, 1:-1]) / hp
+                    - (phi[:, 1:-1] - phi[:, :-2]) / hm
+                )
+                / (hm + hp)
+            )
+        h0 = float(d_centre_y[0])
+        lap[:, 0] += (phi[:, 1] - phi[:, 0]) / (h0 * h0)
+        hN = float(d_centre_y[-1])
+        lap[:, -1] += (phi[:, -2] - phi[:, -1]) / (hN * hN)
+
     return lap
 
 
-def _upwind_1d(phi: np.ndarray, vel: np.ndarray, d: float, axis: int) -> np.ndarray:
+def _upwind_1d_var(
+    phi: np.ndarray, vel: np.ndarray, d_c: np.ndarray, axis: int
+) -> np.ndarray:
+    """First-order upwind using neighbour spacings ``d_c`` (len = n-1)."""
     out = np.zeros_like(phi)
     if axis == 0:
+        hm = d_c[:-1, None]
+        hp = d_c[1:, None]
         out[1:-1] = np.where(
             vel[1:-1] >= 0.0,
-            (phi[1:-1] - phi[:-2]) / d,
-            (phi[2:] - phi[1:-1]) / d,
+            (phi[1:-1] - phi[:-2]) / hm,
+            (phi[2:] - phi[1:-1]) / hp,
         )
     else:
+        hm = d_c[:-1][None, :]
+        hp = d_c[1:][None, :]
         out[:, 1:-1] = np.where(
             vel[:, 1:-1] >= 0.0,
-            (phi[:, 1:-1] - phi[:, :-2]) / d,
-            (phi[:, 2:] - phi[:, 1:-1]) / d,
+            (phi[:, 1:-1] - phi[:, :-2]) / hm,
+            (phi[:, 2:] - phi[:, 1:-1]) / hp,
         )
     return out
 
 
-def _central_1d(phi: np.ndarray, d: float, axis: int) -> np.ndarray:
-    """Second-order central difference (preferred for laminar Re=150)."""
+def _central_1d_var(phi: np.ndarray, d_c: np.ndarray, axis: int) -> np.ndarray:
     out = np.zeros_like(phi)
     if axis == 0:
-        out[1:-1] = (phi[2:] - phi[:-2]) / (2.0 * d)
-        out[0] = (phi[1] - phi[0]) / d
-        out[-1] = (phi[-1] - phi[-2]) / d
+        denom = (d_c[:-1] + d_c[1:])[:, None]
+        out[1:-1] = (phi[2:] - phi[:-2]) / denom
+        out[0] = (phi[1] - phi[0]) / d_c[0]
+        out[-1] = (phi[-1] - phi[-2]) / d_c[-1]
     else:
-        out[:, 1:-1] = (phi[:, 2:] - phi[:, :-2]) / (2.0 * d)
-        out[:, 0] = (phi[:, 1] - phi[:, 0]) / d
-        out[:, -1] = (phi[:, -1] - phi[:, -2]) / d
+        denom = (d_c[:-1] + d_c[1:])[None, :]
+        out[:, 1:-1] = (phi[:, 2:] - phi[:, :-2]) / denom
+        out[:, 0] = (phi[:, 1] - phi[:, 0]) / d_c[0]
+        out[:, -1] = (phi[:, -1] - phi[:, -2]) / d_c[-1]
     return out
 
 
-def _convective_grad(
-    phi: np.ndarray, vel: np.ndarray, d: float, axis: int, scheme: str
+def _convective_grad_var(
+    phi: np.ndarray, vel: np.ndarray, d_c: np.ndarray, axis: int, scheme: str
 ) -> np.ndarray:
     if scheme == "upwind":
-        return _upwind_1d(phi, vel, d, axis)
-    # default: central (low numerical diffusion for vortex shedding)
-    return _central_1d(phi, d, axis)
+        return _upwind_1d_var(phi, vel, d_c, axis)
+    return _central_1d_var(phi, d_c, axis)
 
 
 class FluidSolver:
@@ -116,11 +158,24 @@ class FluidSolver:
         self._v_solid = np.zeros(grid.shape_v)
         self._lap_cache: Optional[sparse.csr_matrix] = None
 
+        # Precompute neighbour spacings on each staggered family
+        g = grid
+        # u-faces at x_u; spacing between u-faces ≈ cell widths (interior)
+        self._du_x = np.diff(g.x_u)  # length nx  (== dx_c)
+        self._du_y = g.dy_p.copy() if g.dy_p.size else np.array([g.dy])
+        # v-faces
+        self._dv_x = g.dx_p.copy() if g.dx_p.size else np.array([g.dx])
+        self._dv_y = np.diff(g.y_v)  # length ny (== dy_c)
+        # pressure centres
+        self._dp_x = g.dx_p
+        self._dp_y = g.dy_p
+
     def set_immersed_boundary(self, mask: np.ndarray) -> None:
         """Stationary solid cylinder (zero face velocity on solid-adjacent faces)."""
         self._obstacle = np.asarray(mask, dtype=bool)
         self._u_solid = np.zeros(self.grid.shape_u)
         self._v_solid = np.zeros(self.grid.shape_v)
+        self._lap_cache = None
 
     def _face_mask_u(self) -> np.ndarray:
         m = self._obstacle
@@ -141,15 +196,12 @@ class FluidSolver:
     def _apply_bc(self, u: np.ndarray, v: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         U = self.U_inf
 
-        # Inlet
         u[0, :] = U
         v[0, :] = 0.0
 
-        # Outlet Neumann
         u[-1, :] = u[-2, :]
         v[-1, :] = v[-2, :]
 
-        # Far-field y: freestream / slip
         u[:, 0] = U
         u[:, -1] = U
         v[:, 0] = 0.0
@@ -185,44 +237,55 @@ class FluidSolver:
         return out
 
     def _momentum_H_u(self, u, v) -> np.ndarray:
-        g = self.grid
         v_u = self._interp_v_to_u(v)
         s = self.conv_scheme
-        conv = (
-            u * _convective_grad(u, u, g.dx, 0, s)
-            + v_u * _convective_grad(u, v_u, g.dy, 1, s)
+        d_c_x = np.diff(self.grid.x_u)
+        d_c_y = (
+            self.grid.dy_p if self.grid.dy_p.size else np.array([self.grid.dy])
         )
-        return -conv + self.nu * _laplacian_field(u, g.dx, g.dy)
+        conv = (
+            u * _convective_grad_var(u, u, d_c_x, 0, s)
+            + v_u * _convective_grad_var(u, v_u, d_c_y, 1, s)
+        )
+        return -conv + self.nu * _laplacian_variable(u, d_c_x, d_c_y)
 
     def _momentum_H_v(self, u, v) -> np.ndarray:
-        g = self.grid
         u_v = self._interp_u_to_v(u)
         s = self.conv_scheme
-        conv = (
-            u_v * _convective_grad(v, u_v, g.dx, 0, s)
-            + v * _convective_grad(v, v, g.dy, 1, s)
+        d_c_x = (
+            self.grid.dx_p if self.grid.dx_p.size else np.array([self.grid.dx])
         )
-        return -conv + self.nu * _laplacian_field(v, g.dx, g.dy)
+        d_c_y = np.diff(self.grid.y_v)
+        conv = (
+            u_v * _convective_grad_var(v, u_v, d_c_x, 0, s)
+            + v * _convective_grad_var(v, v, d_c_y, 1, s)
+        )
+        return -conv + self.nu * _laplacian_variable(v, d_c_x, d_c_y)
 
     def _pressure_gradient_faces(self, p: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         g = self.grid
         dpdx = np.zeros(g.shape_u)
         dpdy = np.zeros(g.shape_v)
-        dpdx[1:-1] = (p[1:] - p[:-1]) / g.dx
-        dpdy[:, 1:-1] = (p[:, 1:] - p[:, :-1]) / g.dy
+        # u-face i (1..nx-1) between cells i-1 and i: use centre spacing
+        if g.dx_p.size:
+            dpdx[1:-1] = (p[1:] - p[:-1]) / g.dx_p[:, None]
+        if g.dy_p.size:
+            dpdy[:, 1:-1] = (p[:, 1:] - p[:, :-1]) / g.dy_p[None, :]
         return dpdx, dpdy
 
     def _divergence(self, u, v) -> np.ndarray:
         g = self.grid
-        div = (u[1:] - u[:-1]) / g.dx + (v[:, 1:] - v[:, :-1]) / g.dy
+        div = (u[1:] - u[:-1]) / g.dx_c[:, None] + (v[:, 1:] - v[:, :-1]) / g.dy_c[
+            None, :
+        ]
         div[self._obstacle] = 0.0
         return div
 
     def _build_laplacian(self) -> sparse.csr_matrix:
+        """Variable-spacing Neumann Laplacian consistent with div(grad)."""
         g = self.grid
         nx, ny = g.shape
         n = nx * ny
-        dx2, dy2 = g.dx**2, g.dy**2
         rows, cols, data = [], [], []
 
         def add(r, c, val):
@@ -230,22 +293,30 @@ class FluidSolver:
             cols.append(c)
             data.append(val)
 
+        dx_c, dy_c = g.dx_c, g.dy_c
+        dx_p, dy_p = g.dx_p, g.dy_p
+
         for i in range(nx):
             for j in range(ny):
                 idx = i * ny + j
                 diag = 0.0
+                # x-fluxes through left/right faces
                 if i > 0:
-                    add(idx, idx - ny, 1.0 / dx2)
-                    diag -= 1.0 / dx2
+                    inv = 1.0 / (dx_p[i - 1] * dx_c[i])
+                    add(idx, idx - ny, inv)
+                    diag -= inv
                 if i < nx - 1:
-                    add(idx, idx + ny, 1.0 / dx2)
-                    diag -= 1.0 / dx2
+                    inv = 1.0 / (dx_p[i] * dx_c[i])
+                    add(idx, idx + ny, inv)
+                    diag -= inv
                 if j > 0:
-                    add(idx, idx - 1, 1.0 / dy2)
-                    diag -= 1.0 / dy2
+                    inv = 1.0 / (dy_p[j - 1] * dy_c[j])
+                    add(idx, idx - 1, inv)
+                    diag -= inv
                 if j < ny - 1:
-                    add(idx, idx + 1, 1.0 / dy2)
-                    diag -= 1.0 / dy2
+                    inv = 1.0 / (dy_p[j] * dy_c[j])
+                    add(idx, idx + 1, inv)
+                    diag -= inv
                 add(idx, idx, diag if abs(diag) > 0 else 1.0)
 
         A = sparse.coo_matrix((data, (rows, cols)), shape=(n, n)).tolil()
@@ -308,11 +379,6 @@ class FluidSolver:
     def force_coefficients(
         self, cylinder_D: float, surface_mask: np.ndarray
     ) -> Tuple[float, float]:
-        """Approximate Cd, Cl from pressure on a near-surface fluid band.
-
-        Uses ``F ≈ -p n ΔA`` with outward normal from cylinder centre;
-        normalised by ``½ ρ U² D`` (2-D unit depth).
-        """
         g = self.grid
         p = self.state.p
         solid = self._obstacle
@@ -329,7 +395,9 @@ class FluidSolver:
         r = np.sqrt(rx * rx + ry * ry) + 1e-12
         nx_hat = rx / r
         ny_hat = ry / r
-        area = min(g.dx, g.dy)  # unit depth
+        # local cell size for band cells
+        ii, jj = np.where(band)
+        area = np.minimum(g.dx_c[ii], g.dy_c[jj])
         px = p[band]
         Fx = float(np.sum(-px * nx_hat * area))
         Fy = float(np.sum(-px * ny_hat * area))
