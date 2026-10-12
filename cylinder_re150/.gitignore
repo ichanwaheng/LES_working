@@ -1,5 +1,6 @@
 output/
 output_*/
+structured_mesh/
 __pycache__/
 *.pyc
 .pytest_cache/
