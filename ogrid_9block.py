@@ -63,6 +63,11 @@ class NineBlockOGridLayout:
     x_lines: np.ndarray  # nodes, increasing
     y_lines: np.ndarray  # nodes, increasing
 
+    # Region metadata (computed)
+    # Keys: ogrid, top_left, top_mid, top_right, mid_left, mid_right,
+    #       bot_left, bot_mid, bot_right
+    regions: dict
+
 
 def _geometric_series_to_max(
     ds0: float, ds_max: float, growth: float
@@ -212,6 +217,26 @@ def build_9block_ogrid_layout(
     y_lines = np.unique(np.concatenate([y_bot, y_mid, y_top]))
     y_lines.sort()
 
+    def _count_cells(lines: np.ndarray, a: float, b: float) -> int:
+        mask = (lines >= a - 1e-12) & (lines <= b + 1e-12)
+        n = int(mask.sum()) - 1
+        return max(n, 0)
+
+    regions = {
+        "ogrid": {"xmin": x0, "xmax": x1, "ymin": y0, "ymax": y1},
+        "top_left": {"xmin": domain.xmin, "xmax": x0, "ymin": y1, "ymax": domain.ymax},
+        "top_mid": {"xmin": x0, "xmax": x1, "ymin": y1, "ymax": domain.ymax},
+        "top_right": {"xmin": x1, "xmax": domain.xmax, "ymin": y1, "ymax": domain.ymax},
+        "mid_left": {"xmin": domain.xmin, "xmax": x0, "ymin": y0, "ymax": y1},
+        "mid_right": {"xmin": x1, "xmax": domain.xmax, "ymin": y0, "ymax": y1},
+        "bot_left": {"xmin": domain.xmin, "xmax": x0, "ymin": domain.ymin, "ymax": y0},
+        "bot_mid": {"xmin": x0, "xmax": x1, "ymin": domain.ymin, "ymax": y0},
+        "bot_right": {"xmin": x1, "xmax": domain.xmax, "ymin": domain.ymin, "ymax": y0},
+    }
+    for r in regions.values():
+        r["nx"] = _count_cells(x_lines, r["xmin"], r["xmax"])
+        r["ny"] = _count_cells(y_lines, r["ymin"], r["ymax"])
+
     return NineBlockOGridLayout(
         domain=domain,
         cylinder=cylinder,
@@ -226,6 +251,7 @@ def build_9block_ogrid_layout(
         y1=y1,
         x_lines=x_lines,
         y_lines=y_lines,
+        regions=regions,
     )
 
 
