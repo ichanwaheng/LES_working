@@ -2,641 +2,686 @@
 """
 ns_staggered_euler.py
 =====================
-2-D incompressible Navier–Stokes on a MAC staggered grid, following the
-finite-difference projection method of Griebel, Dornseifer & Neunhoeffer
-(1998) as implemented in:
+2-D incompressible Navier–Stokes on the **structured multiblock staggered
+mesh** from ``mesh_from_known_sizes.py``.
+
+Meshing
+-------
+Cell / face locations come from ``mesh_output/staggered_*.npz``
+(P at cell centres, velocities at face centres).  That is the same O–H
+channel-cylinder mesh already built for this case — not a coarse Cartesian
+box.
+
+Solver method (time / convection / projection)
+----------------------------------------------
+Algorithm structure follows Griebel, Dornseifer & Neunhoeffer (1998) as in:
 
     https://github.com/CaptainProton42/NavierStokes
 
-Algorithm (per time step) — identical structure to ``main.c`` there
--------------------------------------------------------------------
-1. Set boundary conditions on staggered ``u``, ``v``.
-2. Intermediate fields ``F``, ``G`` (explicit Euler, no pressure)::
+Per step (same as their ``main.c``)::
 
-       F = u + Δt · ( (1/Re) ∇²u − ∂(u²)/∂x − ∂(uv)/∂y )
-       G = v + Δt · ( (1/Re) ∇²v − ∂(uv)/∂x − ∂(v²)/∂y )
+    1. apply BCs
+    2. F, G  = explicit Euler predictors  (no pressure)
+         F = u + Δt · ( ν ∇²u − conv_γ(u) )
+         G = v + Δt · ( ν ∇²v − conv_γ(v) )
+    3. pressure Poisson  ∇²p = (1/Δt) ∇·U*
+    4. correct staggered face flux / cell velocity
 
-3. Pressure Poisson by SOR::
+Convection is the Griebel **donor-cell / γ** face blend
+(``integration.c``)::
 
-       ∇²p = (1/Δt) ( ∂F/∂x + ∂G/∂y )
+    φ_f = ½(φ_o+φ_n) − ½ γ sign(U_n) (φ_n−φ_o)
 
-4. Correct velocities::
+    γ = 0        → central      ``--scheme central``
+    γ = 1        → upwind       ``--scheme upwind``
+    γ = max(CFL) → adaptive     ``--scheme donor``  (reference default)
 
-       u ← F − Δt ∂p/∂x
-       v ← G − Δt ∂p/∂y
-
-Convection: Griebel donor-cell / γ-scheme (``integration.c``)
-------------------------------------------------------------
-    γ = 0        → pure central difference     (``--scheme central``)
-    γ = 1        → full donor-cell upwind      (``--scheme upwind``)
-    γ = max(CFL) → adaptive blend              (``--scheme donor``, reference)
-
-Indexing follows the reference: arrays are ``(i_max+2) × (j_max+2)`` with
-a one-cell ghost layer; fluid indices run ``i,j = 1 … i_max / j_max``.
-
-Cylinder Re = 150 uses an immersed no-slip disk on a Cartesian MAC grid.
+On the multiblock mesh the operators are finite-volume (Green–Gauss) at the
+extracted staggered faces; the *method* is the Griebel projection above.
 
 Usage
 -----
     cd cylinder_re150
-    python ns_staggered_euler.py --quick --scheme donor
-    python ns_staggered_euler.py --scheme central --steps 200
-    python ns_staggered_euler.py --scheme upwind --steps 200
+    # uses mesh_output/staggered_result.npz from mesh_from_known_sizes.py
+    python ns_staggered_euler.py --scheme donor --steps 50 --gif
 
-Needs numpy, matplotlib.
+    # rebuild mesh with the known-sizes INPUT, then solve
+    python ns_staggered_euler.py --build-mesh --scheme donor --gif
+
+    # slightly relaxed known-sizes mesh (still O–H multiblock, not Cartesian)
+    python ns_staggered_euler.py --quick --scheme donor --steps 80 --gif --demo
+
+Needs numpy, scipy, matplotlib.
 """
 from __future__ import annotations
 
 import argparse
+import shutil
+import sys
 import time
 from pathlib import Path
 
 import numpy as np
+from scipy import sparse
+from scipy.sparse.linalg import LinearOperator, cg
 
 import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.collections import PolyCollection
 
 HERE = Path(__file__).resolve().parent
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
 
 
 # =====================================================================
-# Donor-cell / central stencils — ported from integration.c
+# load / build staggered mesh from mesh_from_known_sizes
 # =====================================================================
-def du2_dx(u, i, j, dx, gamma):
-    s1 = 0.5 * (u[i, j] + u[i + 1, j])
-    s2 = 0.5 * (u[i - 1, j] + u[i, j])
-    s3 = abs(s1) * 0.5 * (u[i, j] - u[i + 1, j])
-    s4 = abs(s2) * 0.5 * (u[i - 1, j] - u[i, j])
-    return (s1 * s1 - s2 * s2) / dx + gamma * (s3 - s4) / dx
+def load_staggered(path: Path) -> dict:
+    raw = np.load(path, allow_pickle=False)
+    out = dict(
+        cell_centers=raw["cell_centers"].astype(np.float64),
+        face_centers=raw["face_centers"].astype(np.float64),
+        face_normals=raw["face_normals"].astype(np.float64),
+        face_lengths=raw["face_lengths"].astype(np.float64),
+        face_owner=raw["face_owner"].astype(np.int64),
+        face_neigh=raw["face_neigh"].astype(np.int64),
+        face_bc=raw["face_bc"].astype(np.int32),
+        bc_names=[str(x) for x in raw["bc_names"].tolist()],
+        D=float(raw["D"]),
+        xc=float(raw["xc"]),
+        yc=float(raw["yc"]),
+        d_min=float(raw["d_min"]),
+        d_max=float(raw["d_max"]),
+        a=float(raw["a"]),
+    )
+    if "quads" in raw.files:
+        out["quads"] = raw["quads"].astype(np.float64)
+    return out
 
 
-def duv_dy(u, v, i, j, dy, gamma):
-    s1 = 0.5 * (v[i, j] + v[i + 1, j])
-    s2 = 0.5 * (v[i, j - 1] + v[i + 1, j - 1])
-    s3 = s1 * 0.5 * (u[i, j] + u[i, j + 1])
-    s4 = s2 * 0.5 * (u[i, j - 1] + u[i, j])
-    s5 = abs(s1) * 0.5 * (u[i, j] - u[i, j + 1])
-    s6 = abs(s2) * 0.5 * (u[i, j - 1] - u[i, j])
-    return (s3 - s4) / dy + gamma * (s5 - s6) / dy
-
-
-def dv2_dy(v, i, j, dy, gamma):
-    s1 = 0.5 * (v[i, j] + v[i, j + 1])
-    s2 = 0.5 * (v[i, j - 1] + v[i, j])
-    s3 = abs(s1) * 0.5 * (v[i, j] - v[i, j + 1])
-    s4 = abs(s2) * 0.5 * (v[i, j - 1] - v[i, j])
-    return (s1 * s1 - s2 * s2) / dy + gamma * (s3 - s4) / dy
-
-
-def duv_dx(u, v, i, j, dx, gamma):
-    s1 = 0.5 * (u[i, j] + u[i, j + 1])
-    s2 = 0.5 * (u[i - 1, j] + u[i - 1, j + 1])
-    s3 = s1 * 0.5 * (v[i, j] + v[i + 1, j])
-    s4 = s2 * 0.5 * (v[i - 1, j] + v[i, j])
-    s5 = abs(s1) * 0.5 * (v[i, j] - v[i + 1, j])
-    s6 = abs(s2) * 0.5 * (v[i - 1, j] - v[i, j])
-    return (s3 - s4) / dx + gamma * (s5 - s6) / dx
-
-
-def d2u_dx2(u, i, j, dx):
-    return (u[i + 1, j] - 2.0 * u[i, j] + u[i - 1, j]) / (dx * dx)
-
-
-def d2u_dy2(u, i, j, dy):
-    return (u[i, j + 1] - 2.0 * u[i, j] + u[i, j - 1]) / (dy * dy)
-
-
-def d2v_dx2(v, i, j, dx):
-    return (v[i + 1, j] - 2.0 * v[i, j] + v[i - 1, j]) / (dx * dx)
-
-
-def d2v_dy2(v, i, j, dy):
-    return (v[i, j + 1] - 2.0 * v[i, j] + v[i, j - 1]) / (dy * dy)
-
-
-def dp_dx(p, i, j, dx):
-    return (p[i + 1, j] - p[i, j]) / dx
-
-
-def dp_dy(p, i, j, dy):
-    return (p[i, j + 1] - p[i, j]) / dy
-
-
-def FG(F, G, u, v, i_max, j_max, Re, dt, dx, dy, gamma, solid):
-    """CaptainProton42 ``FG()`` — explicit Euler predictors."""
-    inv_Re = 1.0 / Re
-    for i in range(1, i_max + 1):
-        for j in range(1, j_max + 1):
-            if solid[i, j]:
-                if i <= i_max - 1:
-                    F[i, j] = 0.0
-                if j <= j_max - 1:
-                    G[i, j] = 0.0
-                continue
-            if i <= i_max - 1:
-                F[i, j] = u[i, j] + dt * (
-                    inv_Re * (d2u_dx2(u, i, j, dx) + d2u_dy2(u, i, j, dy))
-                    - du2_dx(u, i, j, dx, gamma)
-                    - duv_dy(u, v, i, j, dy, gamma)
-                )
-            if j <= j_max - 1:
-                G[i, j] = v[i, j] + dt * (
-                    inv_Re * (d2v_dx2(v, i, j, dx) + d2v_dy2(v, i, j, dy))
-                    - duv_dx(u, v, i, j, dx, gamma)
-                    - dv2_dy(v, i, j, dy, gamma)
-                )
-    return F, G
-
-
-def L2_fluid(m, i_max, j_max, solid):
-    s = 0.0
-    n = 0
-    for i in range(1, i_max + 1):
-        for j in range(1, j_max + 1):
-            if solid[i, j]:
-                continue
-            s += m[i, j] * m[i, j]
-            n += 1
-    return np.sqrt(s / max(n, 1))
-
-
-def SOR(p, i_max, j_max, dx, dy, res, RHS, omega, eps, max_it, solid):
-    """CaptainProton42 ``SOR()`` with Neumann ghosts + immersed solid."""
-    dydy = dy * dy
-    dxdx = dx * dx
-    denom = 2.0 * (1.0 / dxdx + 1.0 / dydy)
-    norm_p = L2_fluid(p, i_max, j_max, solid)
-
-    for it in range(max_it):
-        # Neumann ghosts (reference fills border with neighbour values)
-        for j in range(1, j_max + 1):
-            p[0, j] = p[1, j]
-            p[i_max + 1, j] = p[i_max, j]
-        for i in range(1, i_max + 1):
-            p[i, 0] = p[i, 1]
-            p[i, j_max + 1] = p[i, j_max]
-
-        for i in range(1, i_max + 1):
-            for j in range(1, j_max + 1):
-                if solid[i, j]:
-                    p[i, j] = 0.0
-                    continue
-                # solid neighbours → Neumann (use own value)
-                pe = p[i, j] if solid[i + 1, j] else p[i + 1, j]
-                pw = p[i, j] if solid[i - 1, j] else p[i - 1, j]
-                pn = p[i, j] if solid[i, j + 1] else p[i, j + 1]
-                ps = p[i, j] if solid[i, j - 1] else p[i, j - 1]
-                p[i, j] = (1.0 - omega) * p[i, j] + (omega / denom) * (
-                    (pe + pw) / dxdx + (pn + ps) / dydy - RHS[i, j]
-                )
-
-        for i in range(1, i_max + 1):
-            for j in range(1, j_max + 1):
-                if solid[i, j]:
-                    res[i, j] = 0.0
-                    continue
-                pe = p[i, j] if solid[i + 1, j] else p[i + 1, j]
-                pw = p[i, j] if solid[i - 1, j] else p[i - 1, j]
-                pn = p[i, j] if solid[i, j + 1] else p[i, j + 1]
-                ps = p[i, j] if solid[i, j - 1] else p[i, j - 1]
-                res[i, j] = (
-                    (pe - 2.0 * p[i, j] + pw) / dxdx
-                    + (pn - 2.0 * p[i, j] + ps) / dydy
-                    - RHS[i, j]
-                )
-
-        res_norm = L2_fluid(res, i_max, j_max, solid)
-        if res_norm <= eps * (norm_p + 0.01):
-            return it + 1, res_norm
-        norm_p = L2_fluid(p, i_max, j_max, solid)
-
-    return max_it, L2_fluid(res, i_max, j_max, solid)
-
-
-# =====================================================================
-# Solver
-# =====================================================================
-class GriebelMACSolver:
+def ensure_staggered_mesh(path: Path, build: bool, quick: bool) -> Path:
     """
-    Griebel / CaptainProton42 MAC projection solver (cylinder Re=150).
+    Return path to staggered_*.npz from the known-sizes mesher.
 
-    Fields are ghost-padded ``(i_max+2, j_max+2)`` like the C reference.
+    ``--quick`` still uses mesh_from_known_sizes (O–H multiblock), only with
+    slightly larger d_min/d_max — never a coarse Cartesian substitute.
+    """
+    path = Path(path)
+    if path.is_file() and not build and not quick:
+        return path
+
+    from mesh_from_known_sizes import INPUT, main as mesh_main
+
+    I = dict(INPUT)
+    tag = "result"
+    if quick:
+        # still the same mesher / topology; modest coarsening for GIF smoke
+        I.update(d_min=0.02, d_max=0.15, growth_ratio=1.18, max_jump=2.0, a=None)
+        tag = "gif"
+        path = HERE / "mesh_output" / f"staggered_{tag}.npz"
+    elif build or not path.is_file():
+        tag = "result"
+        path = HERE / "mesh_output" / f"staggered_{tag}.npz"
+
+    if path.is_file() and quick and not build:
+        # rebuild gif mesh if quads missing
+        try:
+            raw = np.load(path)
+            if "quads" in raw.files:
+                return path
+        except Exception:
+            pass
+
+    print(f"[mesh] building known-sizes staggered mesh → {path}")
+    mesh_main(I, tag=tag)
+    return HERE / "mesh_output" / f"staggered_{tag}.npz"
+
+
+def build_topology(S: dict) -> dict:
+    P, Fc = S["cell_centers"], S["face_centers"]
+    n, L = S["face_normals"], S["face_lengths"]
+    own, nei = S["face_owner"], S["face_neigh"]
+    Nc, Nf = len(P), len(Fc)
+
+    contrib = 0.5 * (Fc[:, 0] * n[:, 0] + Fc[:, 1] * n[:, 1]) * L
+    vol = np.zeros(Nc)
+    np.add.at(vol, own, contrib)
+    interior = nei >= 0
+    np.add.at(vol, nei[interior], -contrib[interior])
+    vol = np.maximum(vol, 1e-30)
+
+    d_pn = np.empty(Nf)
+    d_pn[interior] = np.linalg.norm(P[nei[interior]] - P[own[interior]], axis=1)
+    bnd = ~interior
+    d_pn[bnd] = 2.0 * np.linalg.norm(Fc[bnd] - P[own[bnd]], axis=1)
+    d_pn = np.maximum(d_pn, 1e-30)
+
+    bc_index = {nm: i for i, nm in enumerate(S["bc_names"])}
+    face_bc = S["face_bc"]
+    masks = {nm: face_bc == i for nm, i in bc_index.items()}
+    masks["interior"] = interior
+    masks["boundary"] = ~interior
+
+    hmin = float(np.min(np.sqrt(vol)))
+    return dict(
+        vol=vol,
+        d_pn=d_pn,
+        masks=masks,
+        bc_index=bc_index,
+        Nc=Nc,
+        Nf=Nf,
+        hmin=hmin,
+    )
+
+
+def accumulate(flux, own, nei, Nc):
+    out = np.zeros(Nc)
+    np.add.at(out, own, flux)
+    m = nei >= 0
+    np.add.at(out, nei[m], -flux[m])
+    return out
+
+
+# =====================================================================
+# Griebel donor-cell γ face interpolation  (unstructured form of
+# CaptainProton42/NavierStokes integration.c)
+# =====================================================================
+def donor_cell_face(
+    phi: np.ndarray,
+    Un: np.ndarray,
+    own: np.ndarray,
+    nei: np.ndarray,
+    interior: np.ndarray,
+    gamma: float,
+) -> np.ndarray:
+    """
+    φ_f = ½(φ_o+φ_n) − ½ γ sign(U_n) (φ_n−φ_o)
+
+    γ=0 central, γ=1 full upwind (donor-cell).
+    """
+    phi_f = phi[own].copy()
+    if not interior.any():
+        return phi_f
+    o = own[interior]
+    n = nei[interior]
+    central = 0.5 * (phi[o] + phi[n])
+    upw = np.where(Un[interior] >= 0.0, phi[o], phi[n])
+    # equivalent blend: (1-γ)*central + γ*upwind
+    # = ½(o+n) − ½γ sign(Un)(n−o)
+    phi_f[interior] = (1.0 - gamma) * central + gamma * upw
+    return phi_f
+
+
+# =====================================================================
+# Griebel-style F, G + projection on staggered FV mesh
+# =====================================================================
+class GriebelStaggeredNS:
+    """
+    CaptainProton42 / Griebel projection on the known-sizes staggered mesh.
+
+    Unknowns: cell-centred (u,v,p); continuity on face-normal Un.
     """
 
     def __init__(
         self,
-        i_max: int,
-        j_max: int,
-        a: float,
-        b: float,
+        S: dict,
         Re: float = 150.0,
         U_inf: float = 1.0,
+        rho: float = 1.0,
         scheme: str = "donor",
-        omega: float = 1.7,
-        sor_eps: float = 1e-3,
-        sor_max_it: int = 200,
-        tau: float = 0.5,
-        cx: float = 0.0,
-        cy: float = 0.0,
-        D: float = 1.0,
+        tau: float = 0.4,
+        sor_omega: float = 1.7,
+        poisson: str = "cg",
+        sor_max_it: int = 2000,
+        sor_eps: float = 1e-8,
     ) -> None:
-        self.i_max = int(i_max)
-        self.j_max = int(j_max)
-        self.a = float(a)
-        self.b = float(b)
-        self.dx = a / i_max
-        self.dy = b / j_max
+        self.S = S
+        self.topo = build_topology(S)
         self.Re = float(Re)
+        self.nu = float(U_inf) * float(S["D"]) / float(Re)
         self.U_inf = float(U_inf)
+        self.rho = float(rho)
         self.scheme = str(scheme).lower().strip()
         if self.scheme not in ("central", "upwind", "donor"):
             raise ValueError("scheme must be central | upwind | donor")
-        self.omega = float(omega)
-        self.sor_eps = float(sor_eps)
-        self.sor_max_it = int(sor_max_it)
         self.tau = float(tau)
-        self.cx = float(cx)
-        self.cy = float(cy)
-        self.D = float(D)
+        self.sor_omega = float(sor_omega)
+        self.poisson = str(poisson).lower()
+        self.sor_max_it = int(sor_max_it)
+        self.sor_eps = float(sor_eps)
         self.t = 0.0
 
-        sh = (i_max + 2, j_max + 2)
-        self.u = np.full(sh, self.U_inf)
-        self.v = np.zeros(sh)
-        self.p = np.zeros(sh)
-        self.F = np.zeros(sh)
-        self.G = np.zeros(sh)
-        self.RHS = np.zeros(sh)
-        self.res = np.zeros(sh)
+        Nc, Nf = self.topo["Nc"], self.topo["Nf"]
+        self.u = np.full(Nc, self.U_inf)
+        self.v = np.zeros(Nc)
+        self.p = np.zeros(Nc)
+        self.Un = np.zeros(Nf)
+        self._A = self._build_poisson()
+        self._M = self._build_preconditioner(self._A)
+        self._init_solenoidal()
 
-        # cell-centre coordinates (fluid i,j = 1..imax)
-        self.x = (np.arange(i_max + 2) - 0.5) * self.dx
-        self.y = (np.arange(j_max + 2) - 0.5) * self.dy
-        X, Y = np.meshgrid(self.x, self.y, indexing="ij")
-        R = 0.5 * D
-        self.solid = (X - cx) ** 2 + (Y - cy) ** 2 <= R * R
-        # ghosts never treated as fluid solid for Poisson fluid loops
-        self.solid[0, :] = False
-        self.solid[-1, :] = False
-        self.solid[:, 0] = False
-        self.solid[:, -1] = False
+    @staticmethod
+    def _build_preconditioner(A: sparse.csr_matrix):
+        """Jacobi preconditioner (safe for the singular Neumann Laplacian)."""
+        diag = A.diagonal()
+        inv = np.where(np.abs(diag) > 1e-30, 1.0 / diag, 0.0)
 
-        self._apply_bc()
+        def jacobi(x, inv=inv):
+            return inv * x
 
-    def _apply_bc(self) -> None:
-        """
-        Cylinder channel BCs (analogue of ``boundaries.c`` set_inflow/noslip):
-          west  = inlet U∞
-          east  = Neumann outlet
-          south/north = freestream
-          cylinder cells → no-slip (u=v=0 on adjacent staggered faces)
-        """
-        U = self.U_inf
-        im, jm = self.i_max, self.j_max
-        u, v = self.u, self.v
+        return LinearOperator(A.shape, matvec=jacobi)
 
-        # LEFT inlet
-        for j in range(1, jm + 1):
-            u[0, j] = U
-            v[0, j] = 2.0 * 0.0 - v[1, j]
-        # RIGHT outlet (Neumann on u; average for v)
-        for j in range(1, jm + 1):
-            u[im, j] = u[im - 1, j]
-            v[im + 1, j] = v[im, j]
-        # BOTTOM
-        for i in range(1, im + 1):
-            v[i, 0] = 0.0
-            u[i, 0] = 2.0 * U - u[i, 1]
-        # TOP
-        for i in range(1, im + 1):
-            v[i, jm] = 0.0
-            u[i, jm + 1] = 2.0 * U - u[i, jm]
-
-        # Immersed cylinder: zero velocity in / around solid cells
-        for i in range(1, im + 1):
-            for j in range(1, jm + 1):
-                if self.solid[i, j]:
-                    u[i, j] = 0.0
-                    v[i, j] = 0.0
-                    u[i - 1, j] = 0.0
-                    v[i, j - 1] = 0.0
+    # ----- BCs -----
+    def _enforce_Un_bc(self, Un: np.ndarray) -> np.ndarray:
+        S, m = self.S, self.topo["masks"]
+        n = S["face_normals"]
+        Un = Un.copy()
+        if "inlet" in m:
+            Un[m["inlet"]] = (
+                self.U_inf * n[m["inlet"], 0] + 0.0 * n[m["inlet"], 1]
+            )
+        for w in ("wall_top", "wall_bottom", "cylinder"):
+            if w in m:
+                Un[m[w]] = 0.0
+        return Un
 
     def _gamma(self, dt: float) -> float:
         if self.scheme == "central":
             return 0.0
         if self.scheme == "upwind":
             return 1.0
-        umax = float(np.max(np.abs(self.u)))
-        vmax = float(np.max(np.abs(self.v)))
-        return float(max(umax * dt / self.dx, vmax * dt / self.dy, 0.0))
+        umax = max(float(np.max(np.abs(self.Un))), abs(self.U_inf), 1e-12)
+        return float(min(1.0, umax * dt / self.topo["hmin"]))
 
     def stable_dt(self) -> float:
-        """Adaptive Δt — CaptainProton42 ``main.c`` formula with factor τ."""
-        umax = max(float(np.max(np.abs(self.u))), 1e-12)
-        vmax = max(float(np.max(np.abs(self.v))), 1e-12)
-        dx, dy = self.dx, self.dy
-        dt_diff = self.Re / 2.0 / (1.0 / (dx * dx) + 1.0 / (dy * dy))
-        return float(self.tau * min(dt_diff, dx / umax, dy / vmax))
+        """Adaptive Δt with security τ (CaptainProton42 main.c idea)."""
+        h = self.topo["hmin"]
+        umax = max(float(np.max(np.abs(self.Un))), abs(self.U_inf), 1e-12)
+        dt_conv = h / umax
+        dt_diff = self.Re / 2.0 * h * h  # ~ Re/2 / (1/h²) with h²
+        # match reference: Re/2/(1/dx²+1/dy²) ≈ Re/2/(2/h²) = Re h²/4
+        dt_diff = self.Re * h * h / 4.0
+        return float(self.tau * min(dt_conv, dt_diff))
+
+    # ----- operators -----
+    def _face_velocity_cartesian(self, u, v, Un, gamma):
+        S, topo = self.S, self.topo
+        own, nei = S["face_owner"], S["face_neigh"]
+        interior = topo["masks"]["interior"]
+        uf = donor_cell_face(u, Un, own, nei, interior, gamma)
+        vf = donor_cell_face(v, Un, own, nei, interior, gamma)
+        m = topo["masks"]
+        if "inlet" in m:
+            uf[m["inlet"]], vf[m["inlet"]] = self.U_inf, 0.0
+        for w in ("wall_top", "wall_bottom", "cylinder"):
+            if w in m:
+                uf[m[w]] = 0.0
+                vf[m[w]] = 0.0
+        return uf, vf
+
+    def _convective(self, u, v, Un, gamma):
+        """−∇·(u⊗u) at cells using donor-cell face momentum (Griebel γ)."""
+        S, topo = self.S, self.topo
+        L = S["face_lengths"]
+        Un = self._enforce_Un_bc(Un)
+        uf, vf = self._face_velocity_cartesian(u, v, Un, gamma)
+        ru = accumulate(Un * uf * L, S["face_owner"], S["face_neigh"], topo["Nc"])
+        rv = accumulate(Un * vf * L, S["face_owner"], S["face_neigh"], topo["Nc"])
+        return -ru / topo["vol"], -rv / topo["vol"]
+
+    def _laplacian(self, phi, U_inf_dirichlet_u: bool = False):
+        """ν∇²φ via face gradients (central viscous, as in Griebel d²φ)."""
+        S, topo = self.S, self.topo
+        L, d_pn = S["face_lengths"], topo["d_pn"]
+        own, nei = S["face_owner"], S["face_neigh"]
+        interior = topo["masks"]["interior"]
+        m = topo["masks"]
+        Nf = topo["Nf"]
+
+        phi_f = phi[own].copy()
+        if U_inf_dirichlet_u:
+            if "inlet" in m:
+                phi_f[m["inlet"]] = self.U_inf
+            for w in ("wall_top", "wall_bottom", "cylinder"):
+                if w in m:
+                    phi_f[m[w]] = 0.0
+        else:
+            for w in ("wall_top", "wall_bottom", "cylinder", "inlet"):
+                if w in m:
+                    phi_f[m[w]] = 0.0  # v=0 on those faces
+
+        g = np.empty(Nf)
+        g[interior] = (phi[nei[interior]] - phi[own[interior]]) / d_pn[interior]
+        bnd = ~interior
+        g[bnd] = (phi_f[bnd] - phi[own[bnd]]) / (0.5 * d_pn[bnd])
+        return accumulate(self.nu * g * L, own, nei, topo["Nc"]) / topo["vol"]
+
+    def _div(self, Un):
+        S, topo = self.S, self.topo
+        return (
+            accumulate(Un * S["face_lengths"], S["face_owner"], S["face_neigh"], topo["Nc"])
+            / topo["vol"]
+        )
+
+    def _grad(self, phi):
+        S, topo = self.S, self.topo
+        L, n = S["face_lengths"], S["face_normals"]
+        own, nei = S["face_owner"], S["face_neigh"]
+        interior = topo["masks"]["interior"]
+        pf = phi[own].copy()
+        pf[interior] = 0.5 * (phi[own[interior]] + phi[nei[interior]])
+        gx = accumulate(pf * n[:, 0] * L, own, nei, topo["Nc"]) / topo["vol"]
+        gy = accumulate(pf * n[:, 1] * L, own, nei, topo["Nc"]) / topo["vol"]
+        return gx, gy
+
+    def _build_poisson(self):
+        """
+        Symmetric integrated Neumann Laplacian (singular).
+
+        Null space handled in ``_solve_poisson`` via mean projection.
+        """
+        S, topo = self.S, self.topo
+        L, d_pn = S["face_lengths"], topo["d_pn"]
+        own, nei = S["face_owner"], S["face_neigh"]
+        interior = topo["masks"]["interior"]
+        Nc = topo["Nc"]
+        o, c = own[interior], nei[interior]
+        g = L[interior] / d_pn[interior]
+        rows = np.concatenate([o, o, c, c])
+        cols = np.concatenate([c, o, o, c])
+        data = np.concatenate([g, -g, g, -g])
+        return sparse.coo_matrix((data, (rows, cols)), shape=(Nc, Nc)).tocsr()
+
+    def _solve_poisson(self, rhs: np.ndarray) -> tuple[np.ndarray, int]:
+        rhs = rhs.copy()
+        rhs -= float(np.mean(rhs))
+        if self.poisson == "sor":
+            return self._sor(rhs)
+
+        A = self._A
+        n = A.shape[0]
+
+        def matvec(x, A=A):
+            y = A @ x
+            return y - float(np.mean(y))
+
+        Aop = LinearOperator((n, n), matvec=matvec, dtype=np.float64)
+        p, info = cg(
+            Aop,
+            rhs,
+            x0=np.zeros(n),
+            M=self._M,
+            rtol=self.sor_eps,
+            maxiter=self.sor_max_it,
+        )
+        p = np.nan_to_num(np.asarray(p), nan=0.0)
+        p -= float(np.mean(p))
+        if info != 0:
+            p2, info2 = cg(
+                Aop,
+                rhs,
+                x0=p,
+                M=self._M,
+                rtol=max(self.sor_eps, 1e-6),
+                maxiter=self.sor_max_it * 2,
+            )
+            p = np.nan_to_num(np.asarray(p2), nan=0.0)
+            p -= float(np.mean(p))
+            info = info2
+        return p, 0 if info == 0 else int(info)
+
+    def _sor(self, rhs: np.ndarray) -> tuple[np.ndarray, int]:
+        """Classical SOR on the sparse Laplacian (CaptainProton42 SOR)."""
+        A = self._A
+        p = np.zeros_like(rhs)
+        omega = self.sor_omega
+        indptr, indices, data = A.indptr, A.indices, A.data
+        for it in range(self.sor_max_it):
+            for i in range(len(p)):
+                s = 0.0
+                dii = 0.0
+                for k in range(indptr[i], indptr[i + 1]):
+                    j = indices[k]
+                    if j == i:
+                        dii = data[k]
+                    else:
+                        s += data[k] * p[j]
+                if abs(dii) < 1e-30:
+                    continue
+                p_new = (rhs[i] - s) / dii
+                p[i] = (1.0 - omega) * p[i] + omega * p_new
+            p -= float(np.mean(p))
+            res = A @ p - rhs
+            res -= float(np.mean(res))
+            if np.sqrt(np.mean(res * res)) <= self.sor_eps * (
+                np.sqrt(np.mean(p * p)) + 0.01
+            ):
+                return p, it + 1
+        return p, self.sor_max_it
+
+    def _init_solenoidal(self):
+        S = self.S
+        n = S["face_normals"]
+        uf = np.full(self.topo["Nf"], self.U_inf)
+        vf = np.zeros(self.topo["Nf"])
+        Un = uf * n[:, 0] + vf * n[:, 1]
+        self.Un = self._project_Un(Un, dt=1.0)
+
+    def _project_Un(self, Un_star: np.ndarray, dt: float) -> np.ndarray:
+        S, topo = self.S, self.topo
+        own, nei = S["face_owner"], S["face_neigh"]
+        d_pn = topo["d_pn"]
+        interior = topo["masks"]["interior"]
+        Un_star = self._enforce_Un_bc(Un_star)
+        div = self._div(Un_star)
+        # A p = (ρ/dt) V div   (integrated, like Griebel RHS·volume)
+        rhs = (self.rho / dt) * topo["vol"] * div
+        p_corr, info = self._solve_poisson(rhs)
+        self._p_corr = p_corr
+        self._poisson_info = info
+        Un_new = Un_star.copy()
+        Un_new[interior] = Un_star[interior] - (dt / self.rho) * (
+            (p_corr[nei[interior]] - p_corr[own[interior]]) / d_pn[interior]
+        )
+        return self._enforce_Un_bc(Un_new)
 
     def step(self, dt: float | None = None) -> dict:
-        im, jm = self.i_max, self.j_max
-        dx, dy = self.dx, self.dy
-        self._apply_bc()
+        """One Griebel step: BC → F,G → Poisson → correct."""
+        S = self.S
+        n = S["face_normals"]
         if dt is None:
             dt = self.stable_dt()
         gamma = self._gamma(dt)
+        self.Un = self._enforce_Un_bc(self.Un)
 
-        # F, G
-        self.F[:, :] = self.u
-        self.G[:, :] = self.v
-        FG(
-            self.F,
-            self.G,
-            self.u,
-            self.v,
-            im,
-            jm,
-            self.Re,
-            dt,
-            dx,
-            dy,
-            gamma,
-            self.solid,
-        )
-        # BC faces for F,G (reference copies boundary velocities)
-        self.F[0, :] = self.u[0, :]
-        self.F[im, :] = self.u[im, :]
-        self.G[:, 0] = self.v[:, 0]
-        self.G[:, jm] = self.v[:, jm]
+        # --- F, G predictors (CaptainProton42 FG) ---
+        cu, cv = self._convective(self.u, self.v, self.Un, gamma)
+        lu = self._laplacian(self.u, U_inf_dirichlet_u=True)
+        lv = self._laplacian(self.v, U_inf_dirichlet_u=False)
+        F = self.u + dt * (lu + cu)  # cu already = −conv
+        G = self.v + dt * (lv + cv)
 
-        # RHS of Poisson
-        for i in range(1, im + 1):
-            for j in range(1, jm + 1):
-                if self.solid[i, j]:
-                    self.RHS[i, j] = 0.0
-                else:
-                    self.RHS[i, j] = (1.0 / dt) * (
-                        (self.F[i, j] - self.F[i - 1, j]) / dx
-                        + (self.G[i, j] - self.G[i, j - 1]) / dy
-                    )
+        # face normal from F,G (central) then project
+        uf, vf = self._face_velocity_cartesian(F, G, self.Un, gamma=0.0)
+        Un_star = uf * n[:, 0] + vf * n[:, 1]
+        Un_new = self._project_Un(Un_star, dt)
+        p_corr = self._p_corr
 
-        sor_it, sor_res = SOR(
-            self.p,
-            im,
-            jm,
-            dx,
-            dy,
-            self.res,
-            self.RHS,
-            self.omega,
-            self.sor_eps,
-            self.sor_max_it,
-            self.solid,
-        )
-
-        # Velocity update
-        for i in range(1, im + 1):
-            for j in range(1, jm + 1):
-                if self.solid[i, j]:
-                    self.u[i, j] = 0.0
-                    self.v[i, j] = 0.0
-                    continue
-                if i <= im - 1:
-                    self.u[i, j] = self.F[i, j] - dt * dp_dx(self.p, i, j, dx)
-                if j <= jm - 1:
-                    self.v[i, j] = self.G[i, j] - dt * dp_dy(self.p, i, j, dy)
-
-        self._apply_bc()
+        gx, gy = self._grad(p_corr)
+        self.u = F - (dt / self.rho) * gx
+        self.v = G - (dt / self.rho) * gy
+        self.p = self.p + p_corr
+        self.Un = Un_new
         self.t += dt
-
-        # divergence on fluid cells
-        max_div = 0.0
-        for i in range(1, im + 1):
-            for j in range(1, jm + 1):
-                if self.solid[i, j]:
-                    continue
-                div = (self.u[i, j] - self.u[i - 1, j]) / dx + (
-                    self.v[i, j] - self.v[i, j - 1]
-                ) / dy
-                max_div = max(max_div, abs(div))
 
         return dict(
             t=self.t,
             dt=dt,
             gamma=gamma,
-            max_div=float(max_div),
+            max_div=float(np.max(np.abs(self._div(self.Un)))),
             max_u=float(np.max(np.abs(self.u))),
             max_v=float(np.max(np.abs(self.v))),
-            sor_it=int(sor_it),
-            sor_res=float(sor_res),
+            poisson=int(self._poisson_info),
         )
 
-    def cell_speed(self) -> np.ndarray:
-        im, jm = self.i_max, self.j_max
-        speed = np.full((im, jm), np.nan)
-        for i in range(1, im + 1):
-            for j in range(1, jm + 1):
-                if self.solid[i, j]:
-                    continue
-                uc = 0.5 * (self.u[i - 1, j] + self.u[i, j])
-                vc = 0.5 * (self.v[i, j - 1] + self.v[i, j])
-                speed[i - 1, j - 1] = np.hypot(uc, vc)
-        return speed
+    def speed(self) -> np.ndarray:
+        return np.hypot(self.u, self.v)
 
 
 # =====================================================================
-# I/O
+# plots / GIF
 # =====================================================================
-def save_fields(path: Path, solver: GriebelMACSolver, hist: list) -> None:
+def save_fields(path: Path, solver: GriebelStaggeredNS, hist: list) -> None:
     np.savez_compressed(
         path,
         t=solver.t,
         u=solver.u,
         v=solver.v,
         p=solver.p,
-        speed=solver.cell_speed(),
-        x=solver.x,
-        y=solver.y,
+        Un=solver.Un,
+        cell_centers=solver.S["cell_centers"],
         scheme=np.array(solver.scheme),
         hist_t=np.array([h["t"] for h in hist]),
         hist_div=np.array([h["max_div"] for h in hist]),
         hist_umax=np.array([h["max_u"] for h in hist]),
-        hist_gamma=np.array([h["gamma"] for h in hist]),
     )
 
 
-def _speed_pcolormesh(ax, solver: GriebelMACSolver, vmax: float | None = None):
-    """Draw |U| field + cylinder on ``ax``; return mappable."""
-    speed = solver.cell_speed()
-    im, jm = solver.i_max, solver.j_max
-    xe = np.linspace(0.0, solver.a, im + 1)
-    ye = np.linspace(0.0, solver.b, jm + 1)
+def _draw_speed(ax, solver: GriebelStaggeredNS, vmax: float | None = None):
+    S = solver.S
+    speed = solver.speed()
     if vmax is None:
-        finite = speed[np.isfinite(speed)]
-        vmax = max(1.5, float(np.percentile(finite, 98))) if finite.size else 1.5
-    pcm = ax.pcolormesh(
-        xe,
-        ye,
-        np.ma.masked_invalid(speed).T,
-        shading="auto",
-        cmap="viridis",
-        vmin=0.0,
-        vmax=vmax,
-    )
-    ax.add_patch(
-        plt.Circle(
-            (solver.cx, solver.cy),
-            0.5 * solver.D,
-            fc="white",
-            ec="k",
-            lw=1.2,
+        vmax = max(1.5, float(np.percentile(speed, 98)))
+    if "quads" in S:
+        coll = PolyCollection(
+            S["quads"],
+            array=speed,
+            cmap="viridis",
+            edgecolors="none",
+            linewidths=0,
         )
+        coll.set_clim(0.0, vmax)
+        ax.add_collection(coll)
+        mappable = coll
+    else:
+        P = S["cell_centers"]
+        mappable = ax.scatter(
+            P[:, 0], P[:, 1], c=speed, s=2, cmap="viridis", vmin=0, vmax=vmax
+        )
+    ax.add_patch(
+        plt.Circle((S["xc"], S["yc"]), S["D"] / 2, fc="white", ec="k", lw=1.2, zorder=5)
     )
     ax.set_aspect("equal")
-    ax.set_xlim(max(0.0, solver.cx - 2), min(solver.a, solver.cx + 10))
-    ax.set_ylim(max(0.0, solver.cy - 3.5), min(solver.b, solver.cy + 3.5))
-    return pcm
+    ax.set_xlim(S["xc"] - 3, S["xc"] + 10)
+    ax.set_ylim(S["yc"] - 4, S["yc"] + 4)
+    return mappable
 
 
-def save_wake_frame(
-    path: Path,
-    solver: GriebelMACSolver,
-    vmax: float = 1.8,
-) -> Path:
-    """Single wake frame for GIF assembly (``wake_tXXXX.png``)."""
+def save_wake_frame(path: Path, solver: GriebelStaggeredNS, vmax: float = 1.8) -> Path:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    fig, ax = plt.subplots(figsize=(8.5, 3.6))
-    pcm = _speed_pcolormesh(ax, solver, vmax=vmax)
+    fig, ax = plt.subplots(figsize=(9.0, 3.8))
+    m = _draw_speed(ax, solver, vmax=vmax)
     ax.set_title(
-        f"Re={solver.Re:g}  scheme={solver.scheme}  tU/D={solver.t:.2f}",
+        f"Re={solver.Re:g}  scheme={solver.scheme}  tU/D={solver.t:.2f}  "
+        f"cells={solver.topo['Nc']:,}",
         loc="left",
         fontsize=10,
         fontweight="bold",
     )
     ax.set_xlabel("x")
     ax.set_ylabel("y")
-    fig.colorbar(pcm, ax=ax, fraction=0.046, pad=0.02, label="|U|")
+    fig.colorbar(m, ax=ax, fraction=0.046, pad=0.02, label="|U|")
     fig.tight_layout()
     fig.savefig(path, dpi=110, bbox_inches="tight")
     plt.close(fig)
     return path
 
 
-def plot_solution(path: Path, solver: GriebelMACSolver, hist: list) -> None:
+def plot_solution(path: Path, solver: GriebelStaggeredNS, hist: list) -> None:
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-    ax = axes[0]
-    pcm = _speed_pcolormesh(ax, solver)
-    ax.set_title(
-        f"|U|  Griebel/MAC  scheme={solver.scheme}  t={solver.t:.3f}",
+    m = _draw_speed(axes[0], solver)
+    axes[0].set_title(
+        f"|U|  Griebel on known-sizes mesh  scheme={solver.scheme}  t={solver.t:.3f}",
         loc="left",
         fontsize=10,
         fontweight="bold",
     )
-    fig.colorbar(pcm, ax=ax, fraction=0.046, pad=0.04)
-
-    ax = axes[1]
-    ax.semilogy(
+    fig.colorbar(m, ax=axes[0], fraction=0.046, pad=0.04)
+    axes[1].semilogy(
         [h["t"] for h in hist],
         [max(h["max_div"], 1e-16) for h in hist],
         "k-",
         lw=1.5,
     )
-    ax.set_xlabel("t")
-    ax.set_ylabel("max |∇·U|")
-    ax.set_title("Continuity residual (after SOR)", loc="left", fontsize=10)
-    ax.grid(True, alpha=0.3)
+    axes[1].set_xlabel("t")
+    axes[1].set_ylabel("max |∇·U|")
+    axes[1].set_title("Continuity residual", loc="left", fontsize=10)
+    axes[1].grid(True, alpha=0.3)
     fig.tight_layout()
     fig.savefig(path, dpi=130, bbox_inches="tight")
     plt.close(fig)
 
 
-def build_gif(
-    frame_paths: list[Path],
-    gif_path: Path,
-    fps: int = 8,
-    max_width: int = 900,
-) -> Path:
-    """Assemble wake frames into an animated GIF (shared palette)."""
-    try:
-        from viz import save_wake_gif
+def build_gif(frames: list[Path], gif_path: Path, fps: int = 8) -> Path:
+    from viz import save_wake_gif
 
-        return save_wake_gif(frame_paths, gif_path, fps=fps, max_width=max_width)
-    except Exception:
-        # Fallback if viz import path differs
-        from PIL import Image
-
-        rgb = []
-        for p in frame_paths:
-            im = Image.open(p).convert("RGB")
-            if max_width and im.width > max_width:
-                h = int(im.height * max_width / im.width)
-                im = im.resize((max_width, h), Image.Resampling.LANCZOS)
-            rgb.append(im)
-        pal = rgb[0].quantize(colors=256, method=Image.Quantize.MEDIANCUT)
-        frames = [pal] + [im.quantize(colors=256, palette=pal) for im in rgb[1:]]
-        gif_path = Path(gif_path)
-        gif_path.parent.mkdir(parents=True, exist_ok=True)
-        frames[0].save(
-            gif_path,
-            format="GIF",
-            save_all=True,
-            append_images=frames[1:],
-            duration=max(int(1000 / max(fps, 1)), 40),
-            loop=0,
-            optimize=False,
-            disposal=2,
-        )
-        return gif_path
+    return save_wake_gif(frames, gif_path, fps=fps, max_width=900)
 
 
+# =====================================================================
+# main
+# =====================================================================
 def parse_args():
     p = argparse.ArgumentParser(
         description=(
-            "Griebel MAC NS solver "
-            "(method of github.com/CaptainProton42/NavierStokes)"
+            "Griebel MAC projection on mesh_from_known_sizes staggered mesh "
+            "(method: github.com/CaptainProton42/NavierStokes)"
         )
+    )
+    p.add_argument(
+        "--mesh",
+        type=str,
+        default=str(HERE / "mesh_output" / "staggered_result.npz"),
+        help="staggered npz from mesh_from_known_sizes.py",
+    )
+    p.add_argument(
+        "--build-mesh",
+        action="store_true",
+        help="rebuild staggered mesh with known-sizes INPUT before solving",
+    )
+    p.add_argument(
+        "--quick",
+        action="store_true",
+        help="relaxed known-sizes O–H mesh (still multiblock, for faster GIF)",
     )
     p.add_argument(
         "--scheme",
         choices=("central", "upwind", "donor"),
         default="donor",
-        help="γ=0 / γ=1 / adaptive donor-cell (reference default)",
     )
     p.add_argument("--steps", type=int, default=50)
-    p.add_argument("--t-end", type=float, default=None)
     p.add_argument("--dt", type=float, default=None)
     p.add_argument("--Re", type=float, default=150.0)
     p.add_argument("--U-inf", type=float, default=1.0)
-    p.add_argument("--tau", type=float, default=0.5)
-    p.add_argument("--omega", type=float, default=1.7)
-    p.add_argument("--sor-eps", type=float, default=1e-3)
-    p.add_argument("--sor-max-it", type=int, default=200)
-    p.add_argument("--quick", action="store_true")
+    p.add_argument("--tau", type=float, default=0.4)
+    p.add_argument(
+        "--poisson",
+        choices=("cg", "sor"),
+        default="cg",
+        help="pressure solver (SOR = classic Griebel; CG for large meshes)",
+    )
+    p.add_argument("--sor-eps", type=float, default=1e-8)
+    p.add_argument("--sor-max-it", type=int, default=2000)
     p.add_argument("--out-dir", type=str, default=str(HERE / "output_ns"))
-    p.add_argument("--i-max", type=int, default=None)
-    p.add_argument("--j-max", type=int, default=None)
-    p.add_argument(
-        "--gif",
-        action="store_true",
-        default=True,
-        help="write wake GIF (default: on)",
-    )
-    p.add_argument("--no-gif", action="store_true", help="skip GIF")
+    p.add_argument("--gif", action="store_true", default=True)
+    p.add_argument("--no-gif", action="store_true")
     p.add_argument("--gif-fps", type=int, default=8)
-    p.add_argument(
-        "--frame-every",
-        type=int,
-        default=2,
-        help="save a wake PNG every N steps for the GIF",
-    )
-    p.add_argument(
-        "--demo",
-        action="store_true",
-        help="also copy GIF to demo/cylinder_wake_griebel.gif",
-    )
+    p.add_argument("--frame-every", type=int, default=2)
+    p.add_argument("--demo", action="store_true")
     return p.parse_args()
 
 
@@ -646,89 +691,69 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     write_gif = bool(args.gif) and not bool(args.no_gif)
 
-    # Domain: cylinder in a channel (physical units, D=1)
-    D = 1.0
-    if args.quick:
-        a, b = 16.0, 8.0
-        cx, cy = 4.0, 4.0
-        i_max = args.i_max or 64
-        j_max = args.j_max or 32
-        n_steps = 30 if args.steps == 50 else args.steps
-        sor_max = min(args.sor_max_it, 80)
-    else:
-        a, b = 24.0, 12.0
-        cx, cy = 6.0, 6.0
-        i_max = args.i_max or 160
-        j_max = args.j_max or 80
-        n_steps = args.steps
-        sor_max = args.sor_max_it
-
-    # GIF-oriented quick defaults: enough time to form a wake
-    if write_gif and args.quick and args.steps == 50:
-        n_steps = 120
-
-    solver = GriebelMACSolver(
-        i_max=i_max,
-        j_max=j_max,
-        a=a,
-        b=b,
+    mesh_path = ensure_staggered_mesh(
+        Path(args.mesh), build=args.build_mesh, quick=args.quick
+    )
+    S = load_staggered(mesh_path)
+    solver = GriebelStaggeredNS(
+        S,
         Re=args.Re,
         U_inf=args.U_inf,
         scheme=args.scheme,
-        omega=args.omega,
-        sor_eps=args.sor_eps,
-        sor_max_it=sor_max,
         tau=args.tau,
-        cx=cx,
-        cy=cy,
-        D=D,
+        poisson=args.poisson,
+        sor_eps=args.sor_eps,
+        sor_max_it=args.sor_max_it,
     )
 
+    n_steps = args.steps
+    if write_gif and args.quick and args.steps == 50:
+        n_steps = 80
+
     print("=" * 72)
-    print("GRIEBEL MAC NS  |  method of CaptainProton42/NavierStokes")
+    print("GRIEBEL NS on known-sizes staggered mesh")
+    print("method : https://github.com/CaptainProton42/NavierStokes")
     print("=" * 72)
-    print(f"grid     : {i_max} x {j_max}   dx={solver.dx:.4g}  dy={solver.dy:.4g}")
-    print(f"domain   : {a:g} x {b:g}   cylinder=({cx:g},{cy:g}) D={D:g}")
-    print(f"scheme   : {solver.scheme}   Re={args.Re:g}  τ={args.tau:g}  ω={args.omega:g}")
-    print(f"steps    : {n_steps}" + (f"  t_end={args.t_end}" if args.t_end else ""))
+    print(f"mesh     : {mesh_path}")
+    print(
+        f"cells    : {solver.topo['Nc']:,}   faces: {solver.topo['Nf']:,}   "
+        f"hmin={solver.topo['hmin']:.4g}"
+    )
+    print(
+        f"sizing   : d_min={S['d_min']:g}  d_max={S['d_max']:g}  a={S['a']:.4g}"
+    )
+    print(
+        f"scheme   : {solver.scheme}   Re={args.Re:g}  ν={solver.nu:.6g}  "
+        f"poisson={args.poisson}"
+    )
+    print(f"steps    : {n_steps}")
     if write_gif:
-        print(f"GIF      : every {args.frame_every} steps  @ {args.gif_fps} fps")
+        print(f"GIF      : every {args.frame_every} steps @ {args.gif_fps} fps")
     print("-" * 72)
 
-    # clear old wake frames in this out dir
-    for old in out.glob("wake_t*.png"):
+    for old in out.glob("wake_*.png"):
         old.unlink()
 
-    hist = []
+    hist: list[dict] = []
     frames: list[Path] = []
-    frame_every = max(int(args.frame_every), 1)
+    every = max(int(args.frame_every), 1)
     t0 = time.time()
-    k = 0
-    while True:
-        k += 1
+    for k in range(1, n_steps + 1):
         info = solver.step(args.dt)
         hist.append(info)
-        if write_gif and (k == 1 or k % frame_every == 0):
-            fp = out / f"wake_t{solver.t:07.2f}.png"
-            save_wake_frame(fp, solver)
-            frames.append(fp)
+        if write_gif and (k == 1 or k % every == 0 or k == n_steps):
+            fp = out / f"wake_{k:05d}_t{solver.t:08.4f}.png"
+            frames.append(save_wake_frame(fp, solver))
         if k == 1 or k == n_steps or k % max(1, n_steps // 10) == 0:
             print(
-                f"step {k:5d}  t={info['t']:.4f}  dt={info['dt']:.4g}  "
+                f"step {k:5d}/{n_steps}  t={info['t']:.4f}  dt={info['dt']:.4g}  "
                 f"γ={info['gamma']:.3f}  max|div|={info['max_div']:.3e}  "
-                f"max|u|={info['max_u']:.3f}  SOR={info['sor_it']}"
+                f"max|u|={info['max_u']:.3f}"
             )
-        if k >= n_steps or (args.t_end is not None and solver.t >= args.t_end):
-            break
-    # final frame
-    if write_gif and (not frames or frames[-1].name != f"wake_t{solver.t:07.2f}.png"):
-        fp = out / f"wake_t{solver.t:07.2f}.png"
-        save_wake_frame(fp, solver)
-        frames.append(fp)
 
     elapsed = time.time() - t0
     print("-" * 72)
-    print(f"done in {elapsed:.2f}s  ({elapsed / k * 1000:.1f} ms/step)")
+    print(f"done in {elapsed:.2f}s  ({elapsed / n_steps * 1000:.1f} ms/step)")
 
     tag = f"{solver.scheme}_{'quick' if args.quick else 'run'}"
     fields = out / f"fields_{tag}.npz"
@@ -740,16 +765,22 @@ def main():
 
     gif_path = None
     if write_gif and frames:
+        # unique by path
+        uniq, seen = [], set()
+        for f in frames:
+            if f not in seen:
+                uniq.append(f)
+                seen.add(f)
         gif_path = out / f"cylinder_wake_{solver.scheme}.gif"
-        build_gif(frames, gif_path, fps=int(args.gif_fps))
+        build_gif(uniq, gif_path, fps=int(args.gif_fps))
         print(
-            f"wrote {gif_path}  ({len(frames)} frames, "
+            f"wrote {gif_path}  ({len(uniq)} frames, "
             f"{gif_path.stat().st_size / 1e6:.2f} MB)"
         )
         if args.demo:
             demo = HERE / "demo" / "cylinder_wake_griebel.gif"
             demo.parent.mkdir(parents=True, exist_ok=True)
-            demo.write_bytes(gif_path.read_bytes())
+            shutil.copy2(gif_path, demo)
             print(f"wrote {demo}")
 
     return solver, hist, gif_path

@@ -494,11 +494,9 @@ def extract_staggered(mesh):
     return stagger
 
 
-def write_staggered(path, stagger, I, bl):
+def write_staggered(path, stagger, I, bl, quads=None):
     """Save staggered arrays as a single .npz for calculations."""
-    # object array bc_names → save as list of strings via allow_pickle
-    np.savez_compressed(
-        path,
+    payload = dict(
         cell_centers=stagger["cell_centers"],
         cell_zone=stagger["cell_zone"],
         face_centers=stagger["face_centers"],
@@ -523,6 +521,9 @@ def write_staggered(path, stagger, I, bl):
         T_bl=bl["T"],
         n_bl=bl["n"],
     )
+    if quads is not None:
+        payload["quads"] = np.asarray(quads, dtype=np.float64)
+    np.savez_compressed(path, **payload)
 
 
 def report_staggered(stagger):
@@ -866,7 +867,7 @@ def main(I=INPUT, tag="result"):
     write_vtk(f"{out}/mesh_{tag}.vtk", mesh)
     write_gmsh(f"{out}/mesh_{tag}.msh", mesh)
     plot_mesh(I, bl, mesh, f"{out}/mesh_{tag}.png")
-    write_staggered(f"{out}/staggered_{tag}.npz", stagger, I, bl)
+    write_staggered(f"{out}/staggered_{tag}.npz", stagger, I, bl, quads=mesh["quads"])
     plot_staggered(I, mesh, stagger, f"{out}/staggered_{tag}.png")
     print(f"written to ./{out}/mesh_{tag}.(vtk|msh|png)")
     print(f"written to ./{out}/staggered_{tag}.(npz|png)")
