@@ -106,8 +106,8 @@ def ensure_staggered_mesh(path: Path, build: bool, quick: bool) -> Path:
     """
     Return path to staggered_*.npz from the known-sizes mesher.
 
-    ``--quick`` still uses mesh_from_known_sizes (O–H multiblock), only with
-    slightly larger d_min/d_max — never a coarse Cartesian substitute.
+    ``--quick`` still uses mesh_from_known_sizes (O–H multiblock) with a
+    *larger* d_min for smoke tests — never a Cartesian substitute.
     """
     path = Path(path)
     if path.is_file() and not build and not quick:
@@ -118,24 +118,26 @@ def ensure_staggered_mesh(path: Path, build: bool, quick: bool) -> Path:
     I = dict(INPUT)
     tag = "result"
     if quick:
-        # still the same mesher / topology; modest coarsening for GIF smoke
-        I.update(d_min=0.02, d_max=0.15, growth_ratio=1.18, max_jump=2.0, a=None)
-        tag = "gif"
+        # larger minimum cell → fewer cells, larger Δt, visible wake in smoke test
+        # keep enough room in the channel for BL + O-block (domain |y|≤5)
+        I.update(
+            d_min=0.05,
+            d_max=0.30,
+            growth_ratio=1.20,
+            max_jump=2.5,
+            a=2.0,
+        )
+        tag = "smoke"
         path = HERE / "mesh_output" / f"staggered_{tag}.npz"
     elif build or not path.is_file():
         tag = "result"
         path = HERE / "mesh_output" / f"staggered_{tag}.npz"
 
-    if path.is_file() and quick and not build:
-        # rebuild gif mesh if quads missing
-        try:
-            raw = np.load(path)
-            if "quads" in raw.files:
-                return path
-        except Exception:
-            pass
-
     print(f"[mesh] building known-sizes staggered mesh → {path}")
+    print(
+        f"[mesh] d_min={I['d_min']}  d_max={I['d_max']}  "
+        f"growth={I['growth_ratio']}"
+    )
     mesh_main(I, tag=tag)
     return HERE / "mesh_output" / f"staggered_{tag}.npz"
 
@@ -550,51 +552,82 @@ def save_fields(path: Path, solver: GriebelStaggeredNS, hist: list) -> None:
     )
 
 
-def _draw_speed(ax, solver: GriebelStaggeredNS, vmax: float | None = None):
+def _wake_field(solver: GriebelStaggeredNS) -> tuple[np.ndarray, str]:
+    """
+    Streamwise perturbation u − U∞ (shows recirculation / wake clearly).
+
+    Raw |U|≈U∞ everywhere looks static; the deficit makes flow visible.
+    """
+    return solver.u - solver.U_inf, r"$u - U_\infty$"
+
+
+def _draw_field(
+    ax,
+    solver: GriebelStaggeredNS,
+    field: np.ndarray,
+    vlim: float | None = None,
+    cmap: str = "RdBu_r",
+):
     S = solver.S
-    speed = solver.speed()
-    if vmax is None:
-        vmax = max(1.5, float(np.percentile(speed, 98)))
+    if vlim is None:
+        vlim = float(np.percentile(np.abs(field), 98))
+        vlim = max(vlim, 0.15)
     if "quads" in S:
         coll = PolyCollection(
             S["quads"],
-            array=speed,
-            cmap="viridis",
+            array=field,
+            cmap=cmap,
             edgecolors="none",
             linewidths=0,
         )
-        coll.set_clim(0.0, vmax)
+        coll.set_clim(-vlim, vlim)
         ax.add_collection(coll)
         mappable = coll
     else:
         P = S["cell_centers"]
         mappable = ax.scatter(
-            P[:, 0], P[:, 1], c=speed, s=2, cmap="viridis", vmin=0, vmax=vmax
+            P[:, 0], P[:, 1], c=field, s=3, cmap=cmap, vmin=-vlim, vmax=vlim
         )
+    # sparse velocity arrows so motion direction is obvious
+    P = S["cell_centers"]
+    step = max(len(P) // 400, 1)
+    idx = np.arange(0, len(P), step)
+    ax.quiver(
+        P[idx, 0],
+        P[idx, 1],
+        solver.u[idx],
+        solver.v[idx],
+        color="k",
+        alpha=0.35,
+        scale=25,
+        width=0.0025,
+        zorder=4,
+    )
     ax.add_patch(
         plt.Circle((S["xc"], S["yc"]), S["D"] / 2, fc="white", ec="k", lw=1.2, zorder=5)
     )
     ax.set_aspect("equal")
-    ax.set_xlim(S["xc"] - 3, S["xc"] + 10)
+    ax.set_xlim(S["xc"] - 2, S["xc"] + 12)
     ax.set_ylim(S["yc"] - 4, S["yc"] + 4)
     return mappable
 
 
-def save_wake_frame(path: Path, solver: GriebelStaggeredNS, vmax: float = 1.8) -> Path:
+def save_wake_frame(path: Path, solver: GriebelStaggeredNS, vlim: float = 0.8) -> Path:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    fig, ax = plt.subplots(figsize=(9.0, 3.8))
-    m = _draw_speed(ax, solver, vmax=vmax)
+    field, label = _wake_field(solver)
+    fig, ax = plt.subplots(figsize=(9.5, 4.0))
+    m = _draw_field(ax, solver, field, vlim=vlim)
     ax.set_title(
         f"Re={solver.Re:g}  scheme={solver.scheme}  tU/D={solver.t:.2f}  "
-        f"cells={solver.topo['Nc']:,}",
+        f"cells={solver.topo['Nc']:,}  d_min={solver.S['d_min']:g}",
         loc="left",
         fontsize=10,
         fontweight="bold",
     )
     ax.set_xlabel("x")
     ax.set_ylabel("y")
-    fig.colorbar(m, ax=ax, fraction=0.046, pad=0.02, label="|U|")
+    fig.colorbar(m, ax=ax, fraction=0.046, pad=0.02, label=label)
     fig.tight_layout()
     fig.savefig(path, dpi=110, bbox_inches="tight")
     plt.close(fig)
@@ -603,14 +636,15 @@ def save_wake_frame(path: Path, solver: GriebelStaggeredNS, vmax: float = 1.8) -
 
 def plot_solution(path: Path, solver: GriebelStaggeredNS, hist: list) -> None:
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-    m = _draw_speed(axes[0], solver)
+    field, label = _wake_field(solver)
+    m = _draw_field(axes[0], solver, field)
     axes[0].set_title(
-        f"|U|  Griebel on known-sizes mesh  scheme={solver.scheme}  t={solver.t:.3f}",
+        f"wake  scheme={solver.scheme}  t={solver.t:.3f}  cells={solver.topo['Nc']:,}",
         loc="left",
         fontsize=10,
         fontweight="bold",
     )
-    fig.colorbar(m, ax=axes[0], fraction=0.046, pad=0.04)
+    fig.colorbar(m, ax=axes[0], fraction=0.046, pad=0.04, label=label)
     axes[1].semilogy(
         [h["t"] for h in hist],
         [max(h["max_div"], 1e-16) for h in hist],
@@ -656,7 +690,7 @@ def parse_args():
     p.add_argument(
         "--quick",
         action="store_true",
-        help="relaxed known-sizes O–H mesh (still multiblock, for faster GIF)",
+        help="smoke mesh with larger d_min (O–H multiblock, visible wake)",
     )
     p.add_argument(
         "--scheme",
@@ -664,6 +698,12 @@ def parse_args():
         default="donor",
     )
     p.add_argument("--steps", type=int, default=50)
+    p.add_argument(
+        "--t-end",
+        type=float,
+        default=None,
+        help="stop at this physical time (overrides steps when reached first)",
+    )
     p.add_argument("--dt", type=float, default=None)
     p.add_argument("--Re", type=float, default=150.0)
     p.add_argument("--U-inf", type=float, default=1.0)
@@ -706,9 +746,17 @@ def main():
         sor_max_it=args.sor_max_it,
     )
 
+    # smoke defaults: large d_min mesh + enough physical time for a wake
+    t_end = args.t_end
     n_steps = args.steps
-    if write_gif and args.quick and args.steps == 50:
-        n_steps = 80
+    every = max(int(args.frame_every), 1)
+    if args.quick:
+        if t_end is None:
+            t_end = 8.0
+        if args.steps == 50:
+            n_steps = 5000  # safety cap; t_end usually stops first
+        if args.frame_every == 2:
+            every = 5
 
     print("=" * 72)
     print("GRIEBEL NS on known-sizes staggered mesh")
@@ -726,9 +774,9 @@ def main():
         f"scheme   : {solver.scheme}   Re={args.Re:g}  ν={solver.nu:.6g}  "
         f"poisson={args.poisson}"
     )
-    print(f"steps    : {n_steps}")
+    print(f"steps    : ≤{n_steps}" + (f"  t_end={t_end:g}" if t_end else ""))
     if write_gif:
-        print(f"GIF      : every {args.frame_every} steps @ {args.gif_fps} fps")
+        print(f"GIF      : every {every} steps @ {args.gif_fps} fps")
     print("-" * 72)
 
     for old in out.glob("wake_*.png"):
@@ -736,24 +784,36 @@ def main():
 
     hist: list[dict] = []
     frames: list[Path] = []
-    every = max(int(args.frame_every), 1)
     t0 = time.time()
-    for k in range(1, n_steps + 1):
+    k = 0
+    while True:
+        k += 1
         info = solver.step(args.dt)
         hist.append(info)
-        if write_gif and (k == 1 or k % every == 0 or k == n_steps):
+        if write_gif and (k == 1 or k % every == 0):
             fp = out / f"wake_{k:05d}_t{solver.t:08.4f}.png"
             frames.append(save_wake_frame(fp, solver))
-        if k == 1 or k == n_steps or k % max(1, n_steps // 10) == 0:
+        if k == 1 or k % max(1, 20) == 0:
             print(
-                f"step {k:5d}/{n_steps}  t={info['t']:.4f}  dt={info['dt']:.4g}  "
+                f"step {k:5d}  t={info['t']:.4f}  dt={info['dt']:.4g}  "
                 f"γ={info['gamma']:.3f}  max|div|={info['max_div']:.3e}  "
                 f"max|u|={info['max_u']:.3f}"
             )
+        done = k >= n_steps or (t_end is not None and solver.t >= t_end)
+        if done:
+            if write_gif:
+                fp = out / f"wake_{k:05d}_t{solver.t:08.4f}.png"
+                frames.append(save_wake_frame(fp, solver))
+            print(
+                f"step {k:5d}  t={info['t']:.4f}  dt={info['dt']:.4g}  "
+                f"γ={info['gamma']:.3f}  max|div|={info['max_div']:.3e}  "
+                f"max|u|={info['max_u']:.3f}"
+            )
+            break
 
     elapsed = time.time() - t0
     print("-" * 72)
-    print(f"done in {elapsed:.2f}s  ({elapsed / n_steps * 1000:.1f} ms/step)")
+    print(f"done in {elapsed:.2f}s  ({elapsed / k * 1000:.1f} ms/step)  t={solver.t:.3f}")
 
     tag = f"{solver.scheme}_{'quick' if args.quick else 'run'}"
     fields = out / f"fields_{tag}.npz"
