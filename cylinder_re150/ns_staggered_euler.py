@@ -752,11 +752,11 @@ def main():
     every = max(int(args.frame_every), 1)
     if args.quick:
         if t_end is None:
-            t_end = 8.0
+            t_end = 40.0
         if args.steps == 50:
-            n_steps = 5000  # safety cap; t_end usually stops first
+            n_steps = 10000  # safety cap; t_end usually stops first
         if args.frame_every == 2:
-            every = 5
+            every = 8
 
     print("=" * 72)
     print("GRIEBEL NS on known-sizes staggered mesh")
