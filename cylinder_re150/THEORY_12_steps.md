@@ -1,370 +1,444 @@
-# 12 steps to the cylinder solver
+# 12 steps to the cylinder wake
 
-The same road as Lorena Barba's *CFD Python: 12 steps to Navier–Stokes*
-(<https://github.com/barbagroup/CFDPython>), but every step ends with
-"…and this is where it lives in `ns_staggered_euler.py`". If you have done
-the 12 steps, each piece of the cylinder solver is something you have
-already coded; the only new ingredient (Step 13) is that the grid is a
-multiblock O–H mesh instead of `numpy.linspace`, so `i+1` becomes
-"the neighbour across this face".
+How `ns_staggered_euler.py` solves flow past the cylinder at \(Re=150\),
+told one step at a time: write the equation, discretise it on *our* mesh,
+rearrange for the unknown, code it, look at what comes out. Each step adds
+one piece; by Step 11 the whole solver is on the page, and Step 12 makes the
+pictures.
 
-Notation as in the notebooks: superscript \(n\) = time level, subscript
-\(i\) (or \(i,j\)) = grid point, \(\Delta t\), \(\Delta x\), \(\Delta y\) = step sizes.
+Notation. \(P\) = a cell (pressure point), \(N\) = the cell across face
+\(f\), \(\mathbf{n}_f\) the unit normal pointing \(P\to N\), \(L_f\) the face
+length, \(d_{PN}\) the distance between the two cell centres, \(V_P\) the cell
+area. \(U_{n,f}=\mathbf{u}\cdot\mathbf{n}_f\) is the velocity *through* face
+\(f\). Superscript \(n\) is the time level. Arrays in the code:
+`own[f]`, `nei[f]` (−1 on a boundary), `n[f]`, `L[f]`, `d_pn[f]`, `vol[P]`.
 
 ---
 
-## Step 1 — 1-D linear convection
+## Step 1 — what we are solving and where the unknowns sit
+
+Incompressible Navier–Stokes with \(D=U_\infty=\rho=1\), \(\nu=1/Re\):
 
 \[
-\frac{\partial u}{\partial t}+c\,\frac{\partial u}{\partial x}=0
+\nabla\cdot\mathbf{u}=0,\qquad
+\frac{\partial\mathbf{u}}{\partial t}+\nabla\cdot(\mathbf{u}\otimes\mathbf{u})
+=-\nabla p+\nu\nabla^2\mathbf{u}
 \]
 
-Forward difference in time, backward difference in space:
+The mesh from `mesh_from_known_sizes.py` is loaded as flat arrays — there
+is no `i, j`; a cell knows its neighbours only through its faces:
+
+```python
+S = load_staggered("mesh_output/staggered_fine.npz")
+P   = S["cell_centers"]      # (Nc, 2)  → p, u, v live here
+Fc  = S["face_centers"]      # (Nf, 2)  → Un lives here
+n   = S["face_normals"]      # (Nf, 2)  owner → neighbour
+L   = S["face_lengths"]      # (Nf,)
+own = S["face_owner"]        # (Nf,)  cell on the back side of n
+nei = S["face_neigh"]        # (Nf,)  cell on the front side, -1 if boundary
+```
+
+Three fields are marched in time:
+
+```python
+u  = np.full(Nc, U_inf)      # cell-centred x-velocity
+v  = np.zeros(Nc)            # cell-centred y-velocity
+Un = np.zeros(Nf)            # face-normal velocity  (the staggered unknown)
+p  = np.zeros(Nc)            # pressure, cell-centred
+```
+
+\(p\) in the cells and \(U_n\) on the faces is the staggered (MAC)
+arrangement: the pressure difference across a face and the velocity through
+that face sit at the same place.
+
+**One tool for everything.** Every spatial derivative below is "integrate
+over the cell, turn it into a sum over the cell's faces":
 
 \[
-\frac{u_i^{n+1}-u_i^n}{\Delta t}+c\,\frac{u_i^n-u_{i-1}^n}{\Delta x}=0
+\frac{1}{V_P}\int_{V_P}\nabla\cdot\mathbf{F}\,dV
+=\frac{1}{V_P}\sum_{f\in P}s_{P,f}\,(\mathbf{F}\cdot\mathbf{n})_f\,L_f,
+\qquad s_{P,f}=\begin{cases}+1&P=\text{owner}\\-1&P=\text{neighbour}\end{cases}
+\]
+
+```python
+def accumulate(flux, own, nei, Nc):      # Σ_f s_{P,f} · flux_f  for every cell
+    out = np.zeros(Nc)
+    np.add.at(out, own, flux)            # + for the owner
+    m = nei >= 0
+    np.add.at(out, nei[m], -flux[m])     # − for the neighbour
+    return out
+```
+
+Everything that follows is this function called with a different `flux`.
+
+---
+
+## Step 2 — the time derivative
+
+Forward (explicit) Euler, the same for every cell:
+
+\[
+\frac{\partial\phi}{\partial t}\approx\frac{\phi_P^{n+1}-\phi_P^{n}}{\Delta t}
 \quad\Longrightarrow\quad
-u_i^{n+1}=u_i^n-c\frac{\Delta t}{\Delta x}\left(u_i^n-u_{i-1}^n\right)
+\phi_P^{n+1}=\phi_P^{n}+\Delta t\cdot\big(\text{RHS evaluated with level-}n\text{ fields}\big)
+\]
+
+So the right-hand side is always a *formula* in known numbers, and the new
+field is a one-line `numpy` expression. The cost is a limit on \(\Delta t\)
+(Step 9).
+
+---
+
+## Step 3 — the convective term, three ways
+
+\[
+\big[\nabla\cdot(\mathbf{u}\,\phi)\big]_P
+=\frac{1}{V_P}\sum_{f\in P}s_{P,f}\;U_{n,f}\,\phi_f\,L_f
+\]
+
+\(U_{n,f}L_f\) is the volume flux through the face — we have it, it is the
+staggered unknown. \(\phi_f\) is the value of the transported quantity *at
+the face*, and we only have it in the two cells \(P\) and \(N\). This is the
+choice between the schemes:
+
+\[
+\phi_f=\underbrace{\tfrac12(\phi_P+\phi_N)}_{\text{central}}
+\;-\;\tfrac12\,\gamma\,\operatorname{sign}(U_{n,f})\,(\phi_N-\phi_P)
+\]
+
+* \(\gamma=0\): the average — **central difference**. Second order, no
+  built-in damping.
+* \(\gamma=1\): \(\phi_P\) if the flow goes \(P\to N\), else \(\phi_N\) —
+  **upwind / donor cell**. First order, adds a numerical viscosity
+  \(\approx\tfrac12|U_n|\,d_{PN}\).
+* \(0<\gamma<1\): blend. `--scheme donor` sets
+  \(\gamma=\max_f|U_n|\Delta t/h_{\min}\) (the CFL number), Griebel's
+  adaptive rule.
+
+```python
+def donor_cell_face(phi, Un, own, nei, interior, gamma):
+    phi_f = phi[own].copy()                        # boundary faces: owner value
+    o, nn = own[interior], nei[interior]
+    central = 0.5 * (phi[o] + phi[nn])
+    upwind  = np.where(Un[interior] >= 0.0, phi[o], phi[nn])
+    phi_f[interior] = (1 - gamma) * central + gamma * upwind
+    return phi_f
+
+def _convective(u, v, Un, gamma):                  # returns −∇·(u u), −∇·(u v)
+    uf = donor_cell_face(u, Un, own, nei, interior, gamma)
+    vf = donor_cell_face(v, Un, own, nei, interior, gamma)
+    # boundary faces: uf, vf = (U_inf, 0) at the inlet, (0, 0) on walls/cylinder
+    ru = accumulate(Un * uf * L, own, nei, Nc)
+    rv = accumulate(Un * vf * L, own, nei, Nc)
+    return -ru / vol, -rv / vol
+```
+
+**What we see.** Run to \(tU/D=150\) on the 37k-cell mesh: with `donor`
+(\(\gamma\approx0.36\)) the lift stays \(C_l\equiv0\) — the numerical
+viscosity holds the wake in its steady, symmetric state. With `central` the
+same mesh sheds vortices. The scheme choice is not cosmetic.
+
+---
+
+## Step 4 — the viscous term
+
+\[
+\big[\nu\nabla^2\phi\big]_P
+=\frac{\nu}{V_P}\sum_{f\in P}s_{P,f}\;\Big(\frac{\partial\phi}{\partial n}\Big)_f L_f,
+\qquad
+\Big(\frac{\partial\phi}{\partial n}\Big)_f\approx\frac{\phi_N-\phi_P}{d_{PN}}
+\]
+
+Central two-point gradient across each face; on a boundary face the
+boundary value is used over half the distance,
+\((\phi_{bc}-\phi_P)/(d/2)\).
+
+```python
+def _laplacian(phi, phi_bc):
+    g = np.empty(Nf)
+    g[interior] = (phi[nei[interior]] - phi[own[interior]]) / d_pn[interior]
+    g[bnd]      = (phi_bc[bnd] - phi[own[bnd]]) / (0.5 * d_pn[bnd])
+    return accumulate(nu * g * L, own, nei, Nc) / vol
+```
+
+On a Cartesian cell this reduces to the familiar
+\(\nu(\phi_{i+1}-2\phi_i+\phi_{i-1})/\Delta x^2\); here the four faces may
+point in any direction and the sum takes care of it. (No correction for
+skewed ring cells — one reason the safety factor in Step 9 is 0.4, not 0.5.)
+
+---
+
+## Step 5 — the predictor: momentum without pressure
+
+Steps 2 + 3 + 4 together, leaving the pressure out on purpose:
+
+\[
+F_P=u_P^n+\Delta t\Big[\nu\nabla^2u-\nabla\cdot(\mathbf{u}u)\Big]_P^n,
+\qquad
+G_P=v_P^n+\Delta t\Big[\nu\nabla^2v-\nabla\cdot(\mathbf{u}v)\Big]_P^n
 \]
 
 ```python
-for n in range(nt):
-    un = u.copy()
-    for i in range(1, nx):
-        u[i] = un[i] - c * dt / dx * (un[i] - un[i-1])
+cu, cv = _convective(u, v, Un, gamma)
+F = u + dt * (_laplacian(u, u_bc) + cu)
+G = v + dt * (_laplacian(v, v_bc) + cv)
 ```
 
-**What we learn.** The explicit update needs *only old values* on the
-right-hand side, so each step is a formula, not an equation to solve.
-Using \(u_{i-1}\) (the point the wave is coming *from*) is **upwinding**:
-stable, but it smears the step profile — numerical diffusion.
+\(F,G\) (Griebel's names) have the right momentum but, because nothing has
+enforced continuity, \(\nabla\cdot(F,G)\neq0\). The pressure's only job is
+to fix that.
 
-**In the cylinder solver.** Forward Euler in time is exactly what `step()`
-does. The upwind choice reappears in Step 2 as the \(\gamma=1\) end of the
-donor-cell blend.
-
----
-
-## Step 2 — 1-D nonlinear convection
+To use them on the faces we need the flux they imply:
 
 \[
-\frac{\partial u}{\partial t}+u\,\frac{\partial u}{\partial x}=0
-\qquad\Longrightarrow\qquad
-u_i^{n+1}=u_i^n-u_i^n\frac{\Delta t}{\Delta x}\left(u_i^n-u_{i-1}^n\right)
+U^*_{n,f}=F_f\,n_{x,f}+G_f\,n_{y,f},\qquad F_f=\tfrac12(F_P+F_N)
 \]
-
-The wave speed is now the solution itself. Written in *conservative* form,
-\(\partial_t u+\partial_x(u^2)=0\), the thing being transported through the
-face between \(i\) and \(i+1\) is the flux \((u^2)_{i+\frac12}\), and the
-question becomes: **what value of \(u\) do we use at the face?**
-
-* average of the two sides, \(\tfrac12(u_i+u_{i+1})\) — **central**, second
-  order, but it lets 2Δx wiggles through;
-* the upstream side, \(u_i\) if the flow goes \(i\to i+1\) — **upwind**,
-  first order, always bounded.
-
-Griebel's donor-cell scheme (and CaptainProton42's `integration.c`) writes
-both at once:
-
-\[
-u_{i+\frac12}=\tfrac12\left(u_i+u_{i+1}\right)-\tfrac12\,\gamma\,
-\operatorname{sign}\!\left(u_{i+\frac12}\right)\left(u_{i+1}-u_i\right)
-\]
-
-\(\gamma=0\) is central, \(\gamma=1\) is upwind, anything between is a blend.
-
-**In the cylinder solver.** `donor_cell_face()` is this formula with
-\(i\to\) owner cell, \(i+1\to\) neighbour cell, and the face velocity
-\(U_n\) deciding the sign. `--scheme central|upwind|donor` sets
-\(\gamma=0,\ 1,\ \max(\text{CFL})\). The central scheme is the one that gave
-vortex shedding; upwind damped it away, which is Step 1's numerical
-diffusion showing up as a physical-looking but wrong steady wake.
-
----
-
-## CFL condition (the bonus notebook)
-
-Running Step 1 with more grid points *for the same \(\Delta t\)* blows up.
-The explicit scheme is only stable if information travels less than one cell
-per step:
-
-\[
-\sigma=\frac{u\,\Delta t}{\Delta x}\le\sigma_{\max}
-\qquad\Longrightarrow\qquad
-\Delta t=\sigma_{\max}\frac{\Delta x}{u}
-\]
-
-**In the cylinder solver.** `stable_dt()` computes
-\(\Delta t=\tau\min\!\big(h_{\min}/|u|_{\max},\ Re\,h_{\min}^2/4\big)\). The
-first term is this CFL condition with \(\Delta x\to h_{\min}\) (the smallest
-cell, next to the cylinder) and \(\sigma_{\max}\to\tau=0.4\). The second
-term comes from Step 3.
-
----
-
-## Step 3 — 1-D diffusion
-
-\[
-\frac{\partial u}{\partial t}=\nu\frac{\partial^2u}{\partial x^2}
-\]
-
-Second derivative by the central difference (Taylor expansions of
-\(u_{i+1}\) and \(u_{i-1}\) added together):
-
-\[
-\frac{\partial^2u}{\partial x^2}\approx\frac{u_{i+1}-2u_i+u_{i-1}}{\Delta x^2}
-\qquad\Longrightarrow\qquad
-u_i^{n+1}=u_i^n+\nu\frac{\Delta t}{\Delta x^2}\left(u_{i+1}^n-2u_i^n+u_{i-1}^n\right)
-\]
-
-Stability now needs \(\nu\Delta t/\Delta x^2\le\tfrac12\) — halving
-\(\Delta x\) quarters the allowed \(\Delta t\).
-
-**In the cylinder solver.** `_laplacian()`. The stencil
-\(u_{i+1}-2u_i+u_{i-1}\) is the same as *"sum over the two faces of
-(neighbour − me)"*; on a general cell it becomes
-\(\sum_f (\phi_N-\phi_P)\,L_f/d_{PN}\), divided by the cell area. The
-diffusive limit \(Re\,h_{\min}^2/4\) in `stable_dt()` is
-\(\nu\Delta t/\Delta x^2\le\tfrac14\) in 2-D with \(\nu=1/Re\). It is why the
-fine mesh (\(h_{\min}=0.018\)) runs at \(\Delta t\approx0.0045\).
-
----
-
-## Step 4 — Burgers' equation
-
-\[
-\frac{\partial u}{\partial t}+u\frac{\partial u}{\partial x}=\nu\frac{\partial^2u}{\partial x^2}
-\]
-
-Steps 2 and 3 glued together on the right-hand side:
-
-\[
-u_i^{n+1}=u_i^n
--u_i^n\frac{\Delta t}{\Delta x}\left(u_i^n-u_{i-1}^n\right)
-+\nu\frac{\Delta t}{\Delta x^2}\left(u_{i+1}^n-2u_i^n+u_{i-1}^n\right)
-\]
-
-**What we learn.** Convection and diffusion are *independent* terms
-evaluated from the old field and added. Nothing couples them inside a step.
-
-**In the cylinder solver.** This is Griebel's predictor, line for line:
 
 ```python
-cu, cv = self._convective(self.u, self.v, self.Un, gamma)   # −∇·(u u), −∇·(u v)
-lu = self._laplacian(self.u, ...)                           # ν∇²u
-lv = self._laplacian(self.v, ...)                           # ν∇²v
-F = self.u + dt * (lu + cu)                                 # Burgers step for u
-G = self.v + dt * (lv + cv)                                 # Burgers step for v
+uf, vf  = face_values(F, G, gamma=0.0)      # central average + boundary values
+Un_star = uf * n[:, 0] + vf * n[:, 1]
 ```
 
-\(F, G\) are "Burgers velocities": correct momentum, but nobody has asked
-them to be divergence-free yet. That is the pressure's job (Step 11).
-
 ---
 
-## Steps 5–8 — the same four equations in 2-D
+## Step 6 — the divergence, and the equation for the pressure
 
-Step 5 (linear convection), 6 (nonlinear), 7 (diffusion), 8 (Burgers) add
-the \(j\) index and the second component \(v\). For 2-D Burgers:
-
-\[
-\begin{aligned}
-u_{i,j}^{n+1}=u_{i,j}^n
-&-u_{i,j}^n\frac{\Delta t}{\Delta x}\left(u_{i,j}^n-u_{i-1,j}^n\right)
--v_{i,j}^n\frac{\Delta t}{\Delta y}\left(u_{i,j}^n-u_{i,j-1}^n\right)\\
-&+\nu\frac{\Delta t}{\Delta x^2}\left(u_{i+1,j}^n-2u_{i,j}^n+u_{i-1,j}^n\right)
-+\nu\frac{\Delta t}{\Delta y^2}\left(u_{i,j+1}^n-2u_{i,j}^n+u_{i,j-1}^n\right)
-\end{aligned}
-\]
-
-and the mirror image for \(v\).
-
-**What we learn.** Each grid point talks to its four neighbours
-\((i\pm1,j),(i,j\pm1)\) through its four faces. The \(x\)-terms use the
-east/west pair, the \(y\)-terms the north/south pair. In the array-operations
-notebook the loops become slices, `u[1:-1,1:-1] - u[:-2,1:-1]`.
-
-**In the cylinder solver.** A quad cell on the O–H mesh also has four faces
-and four neighbours, but they are not aligned with \(x\) and \(y\). So
-instead of separate \(x\) and \(y\) stencils, every face contributes
-\(\text{flux}\times L_f\) and we sum over the four faces (`accumulate()`).
-That one sum *is* the two stencils above, rotated to whatever direction the
-face happens to point in. The transported flux through a face is
-\(U_{n,f}\,\phi_f\,L_f\) with \(U_n\) the staggered face velocity and
-\(\phi_f\) from Step 2.
-
----
-
-## Step 9 — Laplace equation
+Divergence of a cell is the net flux out of it:
 
 \[
-\frac{\partial^2p}{\partial x^2}+\frac{\partial^2p}{\partial y^2}=0
-\quad\Longrightarrow\quad
-p_{i,j}=\frac{\Delta y^2\left(p_{i+1,j}+p_{i-1,j}\right)+\Delta x^2\left(p_{i,j+1}+p_{i,j-1}\right)}{2\left(\Delta x^2+\Delta y^2\right)}
+\big[\nabla\cdot\mathbf{u}\big]_P=\frac{1}{V_P}\sum_{f\in P}s_{P,f}\,U_{n,f}\,L_f
 \]
-
-**What we learn.** No time derivative: this is an *equilibrium* problem.
-Iterating the formula (Jacobi) until \(p\) stops changing is a *solver*, not
-a time march. Boundary conditions can be Dirichlet (\(p\) given) or Neumann
-(\(\partial p/\partial n=0\): copy the neighbour, `p[:, -1] = p[:, -2]`).
-
-**In the cylinder solver.** All four boundaries are Neumann
-(\(\partial p/\partial n=0\)), which has two consequences you can see in the
-code: \(p\) is only defined up to a constant (`p -= p.mean()`), and the
-equations are only solvable if the right-hand side sums to zero
-(`_balance_outlet`).
-
----
-
-## Step 10 — Poisson equation
-
-\[
-\frac{\partial^2p}{\partial x^2}+\frac{\partial^2p}{\partial y^2}=b
-\quad\Longrightarrow\quad
-p_{i,j}=\frac{\Delta y^2\left(p_{i+1,j}+p_{i-1,j}\right)+\Delta x^2\left(p_{i,j+1}+p_{i,j-1}\right)-b_{i,j}\Delta x^2\Delta y^2}{2\left(\Delta x^2+\Delta y^2\right)}
-\]
-
-Same iteration as Step 9 with a source \(b\). Every sweep is one matrix–vector
-product with the 5-point Laplacian; convergence takes \(O(N)\) sweeps.
-
-**In the cylinder solver.** `_build_poisson()` assembles the 5-point (here
-4-face) Laplacian once as a sparse matrix \(A\): off-diagonal \(L_f/d_{PN}\),
-diagonal minus the sum. Then `_solve_poisson()` offers three ways to solve
-\(A\,p=b\):
-
-| `--poisson` | what it is in 12-steps language |
-|---|---|
-| `sor` | Step 10's sweep with over-relaxation \(\omega=1.7\) — Griebel's original |
-| `cg` | conjugate gradient: a smarter iteration that uses the symmetry of \(A\) |
-| `lu` (default) | factorise \(A\) once, then every step is two triangular solves (≈2 ms) — possible because the mesh, hence \(A\), never changes |
-
----
-
-## Step 11 — cavity flow: where the pressure comes from
-
-Navier–Stokes with the pressure gradient added to Step 8:
-
-\[
-\frac{\partial\mathbf{u}}{\partial t}+(\mathbf{u}\cdot\nabla)\mathbf{u}
-=-\frac{1}{\rho}\nabla p+\nu\nabla^2\mathbf{u},
-\qquad\nabla\cdot\mathbf{u}=0
-\]
-
-There is no equation that says \(\partial p/\partial t=\dots\). Barba's
-notebook gets one by **taking the divergence of the momentum equation and
-demanding that \(\nabla\cdot\mathbf{u}^{n+1}=0\)**. That yields a Poisson
-equation (Step 10) for \(p\):
-
-\[
-\nabla^2p^{n+1}=\frac{\rho}{\Delta t}\nabla\cdot\mathbf{u}^{*}
-\quad(\text{Griebel form; Barba keeps the extra }\rho\,(u_x^2+2u_yv_x+v_y^2)\text{ terms that cancel if }\nabla\cdot\mathbf{u}^n=0\text{ exactly})
-\]
-
-where \(\mathbf{u}^*=(F,G)\) is the Burgers velocity from Step 4/8. The
-discrete step is then:
-
-1. \(F,G\): Step 8 (Burgers) — no pressure.
-2. \(b=\frac{\rho}{\Delta t}\left(\frac{F_{i+1,j}-F_{i-1,j}}{2\Delta x}+\frac{G_{i,j+1}-G_{i,j-1}}{2\Delta y}\right)\).
-3. Solve Step 10 for \(p^{n+1}\).
-4. Correct:
-\[
-u^{n+1}_{i,j}=F_{i,j}-\frac{\Delta t}{\rho}\frac{p_{i+1,j}-p_{i-1,j}}{2\Delta x},\qquad
-v^{n+1}_{i,j}=G_{i,j}-\frac{\Delta t}{\rho}\frac{p_{i,j+1}-p_{i,j-1}}{2\Delta y}
-\]
-
-Plug (4) into \(\nabla\cdot\mathbf{u}^{n+1}\) and you recover (3): the
-pressure is precisely the field that removes the divergence of \(F,G\).
-
-**What we learn.** The pressure is not marched in time, it is *solved for*
-at every step as a constraint. The \(p_{i+1}-p_{i-1}\) over \(2\Delta x\) in
-Barba's collocated grid skips point \(i\), which is why their cavity solution
-can show a faint checkerboard; the staggered (MAC) grid of Griebel avoids
-this by putting \(u\) on the faces between pressure points so the gradient is
-\((p_{i+1}-p_i)/\Delta x\).
-
-**In the cylinder solver.** `step()` is this list:
 
 ```python
-F = self.u + dt * (lu + cu);  G = self.v + dt * (lv + cv)        # 1. Burgers
-Un_star = uf*n_x + vf*n_y                                       #    F,G → face flux
-Un_new  = self._project_Un(Un_star, dt)                          # 2.+3. b = ρ/dt·V·div(U*), solve A p = b
-                                                                 # 4a. Un -= dt/ρ·(p_N − p_P)/d_PN  (staggered!)
-gx, gy  = self._grad(p_corr)                                     # 4b. cell velocities
-self.u  = F - (dt/rho)*gx;  self.v = G - (dt/rho)*gy
+def _div(Un):
+    return accumulate(Un * L, own, nei, Nc) / vol
 ```
 
-After 4a the face divergence is \(10^{-12}\) — the `max|div|` column in the
-log is the cavity notebook's "is \(\nabla\cdot\mathbf{u}=0\)?" check, printed
-every 20 steps.
+Now the key move. We *want* the end-of-step flux to be
 
----
+\[
+U^{\,n+1}_{n,f}=U^{*}_{n,f}-\Delta t\,\frac{p_N-p_P}{d_{PN}}
+\]
 
-## Step 12 — channel flow: inflow, outflow, and keeping mass
+(the pressure gradient across the face, acting on the velocity through the
+face — a two-point difference, no point skipped) **and** we want
+\(\nabla\cdot\mathbf{u}^{n+1}=0\). Put the first into the second:
 
-Step 12 drives a channel with a body force and periodic ends. Our cylinder
-case is the same channel with an **inlet** and an **outlet** instead:
+\[
+\frac{1}{V_P}\sum_{f}s_{P,f}\Big(U^*_{n,f}-\Delta t\frac{p_N-p_P}{d_{PN}}\Big)L_f=0
+\;\;\Longrightarrow\;\;
+\boxed{\;\sum_{f\in P}s_{P,f}\,\frac{L_f}{d_{PN}}\,(p_N-p_P)=\frac{V_P}{\Delta t}\big[\nabla\cdot\mathbf{u}^*\big]_P\;}
+\]
 
-* inlet: \(u=U_\infty,\ v=0\) (Dirichlet) — `_enforce_Un_bc`;
-* outlet: \(\partial\mathbf{u}/\partial n=0\) (copy the inside value, as the
-  Neumann BC in Step 9) — the face flux is taken from the owner cell;
-* top/bottom walls and the cylinder: \(\mathbf{u}=0\) (no-slip, as the cavity
-  walls in Step 11).
-
-**What we learn (the hard way).** With a zero-gradient outlet, what flows out
-is not automatically what flows in. The Neumann Poisson problem of Step 9
-then has no solution, and the iteration quietly settles on a field whose
-divergence is a non-zero constant everywhere. In this solver that showed up
-as `max|div| ≈ 1e-2` concentrated in the smallest cells. `_balance_outlet`
-shifts the outlet flux by a constant so inflow = outflow before every Poisson
-solve, after which the divergence is at round-off.
-
----
-
-## Step 13 — from `linspace` to the O–H mesh
-
-Everything above was derived on a Cartesian grid with indices \(i,j\). The
-cylinder mesh from `mesh_from_known_sizes.py` is a multiblock mesh (rings
-around the cylinder, a transition block, Cartesian blocks up- and downstream),
-so there is no global \(i,j\). The translation is mechanical:
-
-| 12-steps (Cartesian) | staggered O–H mesh |
-|---|---|
-| point \((i,j)\) | cell \(P\) with area \(V_P\) (`cell_centers`, `vol`) |
-| neighbour \((i+1,j)\) | the cell across face \(f\): owner/neighbour pair (`face_owner`, `face_neigh`) |
-| \(\Delta x\) between them | \(d_{PN}=\lvert\mathbf{x}_N-\mathbf{x}_P\rvert\) (`d_pn`) |
-| face width \(\Delta y\) | \(L_f\) (`face_lengths`) |
-| \(u_{i+\frac12,j}\) on the east face | \(U_{n,f}=\mathbf{u}\cdot\mathbf{n}_f\) on *that* face (`Un`) |
-| "sum of \(x\)-stencil and \(y\)-stencil" | one sum over the cell's faces, \(\sum_f s_{P,f}(\cdot)_f L_f / V_P\) (`accumulate`) |
-| \(\Delta x,\Delta y\) in the CFL rule | \(h_{\min}=\min\sqrt{V_P}\) |
-
-The pressure stays at the cell centres and the velocity used for continuity
-stays on the faces, so this is still the MAC grid of Griebel — just with
-cells that are curved around the cylinder.
-
----
-
-## Reading the plots (the notebooks' `pyplot.contourf` + `quiver`)
-
-Barba's cavity and channel notebooks finish with
+One linear equation per cell, unknowns \(p\) in that cell and its
+neighbours: a Poisson equation. Its matrix never changes (the mesh does not
+move), so it is assembled once:
 
 ```python
-pyplot.contourf(X, Y, p, alpha=0.5, cmap=cm.viridis)
-pyplot.quiver(X[::2, ::2], Y[::2, ::2], u[::2, ::2], v[::2, ::2])
+def _build_poisson():                 # A p = rhs,  A symmetric
+    o, c = own[interior], nei[interior]
+    g = L[interior] / d_pn[interior]
+    rows = np.r_[o, o, c, c]; cols = np.r_[c, o, o, c]; data = np.r_[g, -g, g, -g]
+    return sparse.coo_matrix((data, (rows, cols)), shape=(Nc, Nc)).tocsr()
 ```
 
-— filled colour for a scalar field, arrows for the velocity at every second
-grid point, drawn from the arrays at the *final* time step. Our frames are
-the same two calls, repeated:
+Two facts about \(A\) decide how we solve it. Every boundary is
+\(\partial p/\partial n=0\) (no face coefficient on boundary faces), so rows
+sum to zero: \(p\) is only defined up to a constant, and a solution exists
+only if `rhs.sum() == 0`, i.e. if as much fluid leaves through the outlet as
+enters at the inlet.
 
-* `contourf` becomes a `PolyCollection`: every mesh cell is filled with the
-  colour of its own value (vorticity \(\omega_z=\partial_xv-\partial_yu\) on
-  top, \(u-U_\infty\) below), because the cells are quads of varying size and
-  shape rather than a regular \(X,Y\) grid;
-* `quiver` draws \((u_P,v_P)\) at roughly every 90th cell;
-* one such picture is saved every 100 time steps and the pictures are played
-  in sequence as the GIF/MP4.
+---
 
-So, exactly as in the notebooks, each image is the field *at one instant*,
-coloured and arrowed point by point; the next image is a later instant. There
-are no streamlines (`pyplot.streamplot` is not used); the arrows show the
-local velocity vector, not particle paths.
+## Step 7 — boundary conditions on the flux
+
+Before the divergence is taken, `Un_star` is made to respect the boundaries:
+
+```python
+def _enforce_Un_bc(Un):
+    Un[inlet] = U_inf * n[inlet, 0] + v_in(t) * n[inlet, 1]   # prescribed
+    Un[wall_top] = Un[wall_bottom] = Un[cylinder] = 0.0        # no-slip
+    return Un                                                  # outlet: left as is (zero gradient)
+
+def _balance_outlet(Un):                 # make rhs.sum() == 0
+    Q_other = np.sum(Un[~outlet & bnd] * L[~outlet & bnd])
+    Q_out   = np.sum(Un[outlet] * L[outlet])
+    Un[outlet] += -(Q_other + Q_out) / np.sum(L[outlet])
+    return Un
+```
+
+**What we saw without `_balance_outlet`.** The solver ran, but
+`max|div|` sat at \(10^{-2}\), largest in the tiny cells on the cylinder:
+the unbalanced mass had nowhere to go and was spread over the domain as a
+constant divergence. With it, `max|div|` is \(10^{-12}\).
+
+\(v_{in}(t)=0.1\,U_\infty\sin(\pi t/2)\) for \(t<2\), together with a small
+transverse seed in the initial field, breaks the mirror symmetry of the mesh
+(Step 10).
+
+---
+
+## Step 8 — solve for \(p\), then correct
+
+```python
+rhs = (1.0 / dt) * vol * _div(Un_star)
+rhs -= rhs.mean()                       # exact compatibility after Step 7
+p = solve(A, rhs)                       # lu | cg | sor
+p -= p.mean()                           # fix the arbitrary constant
+```
+
+Three solvers for the same system (`--poisson`):
+
+| option | what it does | cost on 37k cells |
+|---|---|---|
+| `sor` | Gauss–Seidel sweeps with \(\omega=1.7\) (Griebel's original) | thousands of sweeps |
+| `cg` | Jacobi-preconditioned conjugate gradient on the mean-free operator | ≈1000 iterations, 390 ms |
+| `lu` | pin one cell, `splu(A)` once at start-up, then two triangular solves | **2 ms** |
+
+Then the correction, face flux first, cell velocities second:
+
+\[
+U^{\,n+1}_{n,f}=U^*_{n,f}-\Delta t\,\frac{p_N-p_P}{d_{PN}},
+\qquad
+u_P^{n+1}=F_P-\Delta t\,[\partial_xp]_P,\quad
+v_P^{n+1}=G_P-\Delta t\,[\partial_yp]_P
+\]
+
+with the cell gradient from the face averages (Green–Gauss):
+\([\nabla p]_P=\frac{1}{V_P}\sum_f s_{P,f}\,\tfrac12(p_P+p_N)\,\mathbf{n}_fL_f\).
+
+```python
+Un = Un_star.copy()
+Un[interior] -= dt * (p[nei[interior]] - p[own[interior]]) / d_pn[interior]
+Un = _enforce_Un_bc(Un)
+
+pf = 0.5 * (p[own] + p[nei]);  pf[bnd] = p[own[bnd]]
+gx = accumulate(pf * n[:, 0] * L, own, nei, Nc) / vol
+gy = accumulate(pf * n[:, 1] * L, own, nei, Nc) / vol
+u = F - dt * gx
+v = G - dt * gy
+```
+
+Because the face correction uses the same \((p_N-p_P)/d_{PN}\) that built
+\(A\), `_div(Un)` is now zero to solver precision — that is the
+`max|div|=7.9e-13` column in the log, every 20 steps. \(F,G\) contained no
+old pressure, so this \(p\) *is* the pressure at the new level, not an
+increment (`self.p = p`).
+
+---
+
+## Step 9 — choosing \(\Delta t\)
+
+Explicit Euler is stable only if, in every cell, fluid moves less than one
+cell per step and diffusion acts over less than one cell per step. The
+smallest cell is the binding one:
+
+\[
+\Delta t=\tau\,\min\!\left(\frac{h_{\min}}{|u|_{\max}},\;\frac{Re\,h_{\min}^2}{4}\right),
+\qquad h_{\min}=\min_P\sqrt{V_P},\quad\tau=0.4
+\]
+
+```python
+def stable_dt():
+    umax = max(np.abs(Un).max(), U_inf)
+    return tau * min(hmin / umax, Re * hmin**2 / 4)
+```
+
+**Numbers.** Fine mesh: \(h_{\min}=0.0177\) (first ring on the cylinder),
+\(|u|_{\max}\approx1.58\) during shedding → \(\Delta t\approx0.0045\),
+about 1,100 steps per shedding period, 26,600 steps to \(tU/D=120\). The
+far-field cells are 0.12 wide and could take a 7× larger step; a single
+global explicit \(\Delta t\) does not let them.
+
+---
+
+## Step 10 — the initial condition and the symmetry problem
+
+\(u=U_\infty,\ v=0\) everywhere (impulsive start), projected once with
+Steps 6–8 so the first step begins divergence-free.
+
+**What we saw.** The O–H mesh is exactly mirror-symmetric about \(y=0\), and
+so is every operator above. Starting symmetric, the solution *stays*
+symmetric: \(C_l\) printed as `-0.000` for 120 time units while the wake
+grew into the long, steady, unstable bubble of the symmetric branch. Only at
+\(tU/D\approx120\) had round-off grown enough to start the oscillation.
+A small seed in the initial field,
+
+```python
+r2 = (P[:, 0] - 1.0)**2 + P[:, 1]**2            # one diameter behind the cylinder
+v += perturb * U_inf * np.exp(-r2 / 0.5**2)     # perturb = 0.1
+```
+
+brings the onset to \(tU/D\approx20\). The seed is washed out within a few
+time units; both runs end on the same limit cycle (\(C_l\) amplitude 0.75).
+
+---
+
+## Step 11 — the time loop
+
+Everything above, in the order it runs:
+
+```python
+while t < t_end:
+    dt    = stable_dt()                                   # Step 9
+    gamma = scheme_gamma(dt)                              # Step 3
+    Un    = _enforce_Un_bc(Un)                            # Step 7
+    cu, cv = _convective(u, v, Un, gamma)                 # Step 3
+    F = u + dt * (_laplacian(u, u_bc) + cu)               # Steps 4–5
+    G = v + dt * (_laplacian(v, v_bc) + cv)
+    Un_star = face_normal(F, G)                           # Step 5
+    Un_star = _balance_outlet(_enforce_Un_bc(Un_star))    # Step 7
+    rhs = vol / dt * _div(Un_star); rhs -= rhs.mean()     # Step 6
+    p = solve(A, rhs); p -= p.mean()                      # Step 8
+    Un = Un_star - dt * grad_face(p); Un = _enforce_Un_bc(Un)
+    u, v = F - dt * gx(p), G - dt * gy(p)
+    t += dt
+    Cd, Cl = forces_on_cylinder(p, u, v)                  # diagnostics
+    if step % 100 == 0: save_frame(u, v, t)               # Step 12
+```
+
+Forces: pressure \(\sum_{f\in\text{cyl}}p_P\,\mathbf{n}_fL_f\) plus wall
+shear \(\nu\,u_t/(d/2)\) on the cylinder faces, divided by
+\(\tfrac12\rho U_\infty^2D\).
+
+**What comes out** (fine mesh, `central`): after the impulsive-start
+transient, \(C_l\) grows exponentially, saturates at \(\pm0.75\) by
+\(tU/D\approx30\) with period \(1/St\approx4.8\) (\(St\approx0.20\)–\(0.21\)), \(C_d\)
+oscillates at twice that frequency around 1.64. Reference values for an
+unbounded cylinder are \(St\approx0.18\), \(C_d\approx1.33\); the 10 %
+blockage of the ±5D channel and the first-order time scheme push both up.
+
+---
+
+## Step 12 — the pictures
+
+Each frame is the state at one time level, drawn cell by cell:
+
+```python
+coll = PolyCollection(S["quads"], array=field, cmap="RdBu_r")   # one colour per cell
+ax.add_collection(coll)
+idx = np.arange(0, Nc, Nc // 400)                               # ~400 cells
+ax.quiver(P[idx, 0], P[idx, 1], u[idx], v[idx])                  # the velocity vector there
+```
+
+* top panel: \(\omega_z=\partial_xv-\partial_yu\), from the same Green–Gauss
+  gradient as Step 8 — red and blue are the two senses of rotation, so the
+  alternating street is unmistakable;
+* bottom panel: \(u-U_\infty\), so the free stream is white and the wake
+  (slower) is blue, the shoulders (faster) red; arrows are \((u_P,v_P)\) in
+  the sampled cells.
+
+A frame is saved every 100 steps (≈0.45 time units, ~11 per shedding
+period). The GIF is the last ~4 periods looped; the MP4 is the whole history.
+Nothing is traced between frames: the next frame is simply the next saved
+state, coloured and arrowed again. There are no streamlines; an arrow is the
+local velocity vector at that instant, not a path.
+
+---
+
+### The twelve steps on one line
+
+mesh arrays → explicit Euler → \(\gamma\)-blended convective flux →
+central viscous flux → predictor \(F,G\) → divergence ⇒ Poisson for \(p\) →
+BCs + mass balance → solve & correct (faces, then cells) → CFL/diffusive
+\(\Delta t\) → symmetric start + seed → loop → cell-coloured snapshots.
