@@ -1,5 +1,6 @@
 output/
 output_*/
+output_ns/
 mesh_output/
 structured_mesh/
 __pycache__/
