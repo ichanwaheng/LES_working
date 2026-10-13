@@ -467,15 +467,15 @@ def save_fields(path: Path, solver: GriebelMACSolver, hist: list) -> None:
     )
 
 
-def plot_solution(path: Path, solver: GriebelMACSolver, hist: list) -> None:
+def _speed_pcolormesh(ax, solver: GriebelMACSolver, vmax: float | None = None):
+    """Draw |U| field + cylinder on ``ax``; return mappable."""
     speed = solver.cell_speed()
     im, jm = solver.i_max, solver.j_max
-    # cell-centre mesh for pcolormesh
     xe = np.linspace(0.0, solver.a, im + 1)
     ye = np.linspace(0.0, solver.b, jm + 1)
-
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-    ax = axes[0]
+    if vmax is None:
+        finite = speed[np.isfinite(speed)]
+        vmax = max(1.5, float(np.percentile(finite, 98))) if finite.size else 1.5
     pcm = ax.pcolormesh(
         xe,
         ye,
@@ -483,7 +483,7 @@ def plot_solution(path: Path, solver: GriebelMACSolver, hist: list) -> None:
         shading="auto",
         cmap="viridis",
         vmin=0.0,
-        vmax=max(1.5, float(np.nanpercentile(speed, 98))),
+        vmax=vmax,
     )
     ax.add_patch(
         plt.Circle(
@@ -495,8 +495,40 @@ def plot_solution(path: Path, solver: GriebelMACSolver, hist: list) -> None:
         )
     )
     ax.set_aspect("equal")
-    ax.set_xlim(solver.cx - 3, solver.cx + 8)
-    ax.set_ylim(max(0.0, solver.cy - 4), min(solver.b, solver.cy + 4))
+    ax.set_xlim(max(0.0, solver.cx - 2), min(solver.a, solver.cx + 10))
+    ax.set_ylim(max(0.0, solver.cy - 3.5), min(solver.b, solver.cy + 3.5))
+    return pcm
+
+
+def save_wake_frame(
+    path: Path,
+    solver: GriebelMACSolver,
+    vmax: float = 1.8,
+) -> Path:
+    """Single wake frame for GIF assembly (``wake_tXXXX.png``)."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(8.5, 3.6))
+    pcm = _speed_pcolormesh(ax, solver, vmax=vmax)
+    ax.set_title(
+        f"Re={solver.Re:g}  scheme={solver.scheme}  tU/D={solver.t:.2f}",
+        loc="left",
+        fontsize=10,
+        fontweight="bold",
+    )
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
+    fig.colorbar(pcm, ax=ax, fraction=0.046, pad=0.02, label="|U|")
+    fig.tight_layout()
+    fig.savefig(path, dpi=110, bbox_inches="tight")
+    plt.close(fig)
+    return path
+
+
+def plot_solution(path: Path, solver: GriebelMACSolver, hist: list) -> None:
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    ax = axes[0]
+    pcm = _speed_pcolormesh(ax, solver)
     ax.set_title(
         f"|U|  Griebel/MAC  scheme={solver.scheme}  t={solver.t:.3f}",
         loc="left",
@@ -519,6 +551,45 @@ def plot_solution(path: Path, solver: GriebelMACSolver, hist: list) -> None:
     fig.tight_layout()
     fig.savefig(path, dpi=130, bbox_inches="tight")
     plt.close(fig)
+
+
+def build_gif(
+    frame_paths: list[Path],
+    gif_path: Path,
+    fps: int = 8,
+    max_width: int = 900,
+) -> Path:
+    """Assemble wake frames into an animated GIF (shared palette)."""
+    try:
+        from viz import save_wake_gif
+
+        return save_wake_gif(frame_paths, gif_path, fps=fps, max_width=max_width)
+    except Exception:
+        # Fallback if viz import path differs
+        from PIL import Image
+
+        rgb = []
+        for p in frame_paths:
+            im = Image.open(p).convert("RGB")
+            if max_width and im.width > max_width:
+                h = int(im.height * max_width / im.width)
+                im = im.resize((max_width, h), Image.Resampling.LANCZOS)
+            rgb.append(im)
+        pal = rgb[0].quantize(colors=256, method=Image.Quantize.MEDIANCUT)
+        frames = [pal] + [im.quantize(colors=256, palette=pal) for im in rgb[1:]]
+        gif_path = Path(gif_path)
+        gif_path.parent.mkdir(parents=True, exist_ok=True)
+        frames[0].save(
+            gif_path,
+            format="GIF",
+            save_all=True,
+            append_images=frames[1:],
+            duration=max(int(1000 / max(fps, 1)), 40),
+            loop=0,
+            optimize=False,
+            disposal=2,
+        )
+        return gif_path
 
 
 def parse_args():
@@ -547,6 +618,25 @@ def parse_args():
     p.add_argument("--out-dir", type=str, default=str(HERE / "output_ns"))
     p.add_argument("--i-max", type=int, default=None)
     p.add_argument("--j-max", type=int, default=None)
+    p.add_argument(
+        "--gif",
+        action="store_true",
+        default=True,
+        help="write wake GIF (default: on)",
+    )
+    p.add_argument("--no-gif", action="store_true", help="skip GIF")
+    p.add_argument("--gif-fps", type=int, default=8)
+    p.add_argument(
+        "--frame-every",
+        type=int,
+        default=2,
+        help="save a wake PNG every N steps for the GIF",
+    )
+    p.add_argument(
+        "--demo",
+        action="store_true",
+        help="also copy GIF to demo/cylinder_wake_griebel.gif",
+    )
     return p.parse_args()
 
 
@@ -554,6 +644,7 @@ def main():
     args = parse_args()
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
+    write_gif = bool(args.gif) and not bool(args.no_gif)
 
     # Domain: cylinder in a channel (physical units, D=1)
     D = 1.0
@@ -571,6 +662,10 @@ def main():
         j_max = args.j_max or 80
         n_steps = args.steps
         sor_max = args.sor_max_it
+
+    # GIF-oriented quick defaults: enough time to form a wake
+    if write_gif and args.quick and args.steps == 50:
+        n_steps = 120
 
     solver = GriebelMACSolver(
         i_max=i_max,
@@ -596,15 +691,27 @@ def main():
     print(f"domain   : {a:g} x {b:g}   cylinder=({cx:g},{cy:g}) D={D:g}")
     print(f"scheme   : {solver.scheme}   Re={args.Re:g}  τ={args.tau:g}  ω={args.omega:g}")
     print(f"steps    : {n_steps}" + (f"  t_end={args.t_end}" if args.t_end else ""))
+    if write_gif:
+        print(f"GIF      : every {args.frame_every} steps  @ {args.gif_fps} fps")
     print("-" * 72)
 
+    # clear old wake frames in this out dir
+    for old in out.glob("wake_t*.png"):
+        old.unlink()
+
     hist = []
+    frames: list[Path] = []
+    frame_every = max(int(args.frame_every), 1)
     t0 = time.time()
     k = 0
     while True:
         k += 1
         info = solver.step(args.dt)
         hist.append(info)
+        if write_gif and (k == 1 or k % frame_every == 0):
+            fp = out / f"wake_t{solver.t:07.2f}.png"
+            save_wake_frame(fp, solver)
+            frames.append(fp)
         if k == 1 or k == n_steps or k % max(1, n_steps // 10) == 0:
             print(
                 f"step {k:5d}  t={info['t']:.4f}  dt={info['dt']:.4g}  "
@@ -613,6 +720,12 @@ def main():
             )
         if k >= n_steps or (args.t_end is not None and solver.t >= args.t_end):
             break
+    # final frame
+    if write_gif and (not frames or frames[-1].name != f"wake_t{solver.t:07.2f}.png"):
+        fp = out / f"wake_t{solver.t:07.2f}.png"
+        save_wake_frame(fp, solver)
+        frames.append(fp)
+
     elapsed = time.time() - t0
     print("-" * 72)
     print(f"done in {elapsed:.2f}s  ({elapsed / k * 1000:.1f} ms/step)")
@@ -624,7 +737,22 @@ def main():
     plot_solution(plot, solver, hist)
     print(f"wrote {fields}")
     print(f"wrote {plot}")
-    return solver, hist
+
+    gif_path = None
+    if write_gif and frames:
+        gif_path = out / f"cylinder_wake_{solver.scheme}.gif"
+        build_gif(frames, gif_path, fps=int(args.gif_fps))
+        print(
+            f"wrote {gif_path}  ({len(frames)} frames, "
+            f"{gif_path.stat().st_size / 1e6:.2f} MB)"
+        )
+        if args.demo:
+            demo = HERE / "demo" / "cylinder_wake_griebel.gif"
+            demo.parent.mkdir(parents=True, exist_ok=True)
+            demo.write_bytes(gif_path.read_bytes())
+            print(f"wrote {demo}")
+
+    return solver, hist, gif_path
 
 
 if __name__ == "__main__":
