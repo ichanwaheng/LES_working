@@ -51,6 +51,18 @@ Usage
     # slightly relaxed known-sizes mesh (still O–H multiblock, not Cartesian)
     python ns_staggered_euler.py --quick --scheme donor --steps 80 --gif --demo
 
+    # fine known-sizes mesh (d_min=0.015, ~37k cells) run to tU/D=120:
+    # von Kármán shedding is established by tU/D≈30 (Cl ≈ ±0.75, St ≈ 0.20)
+    python ns_staggered_euler.py --fine --scheme central --demo
+
+    # continue a finished run for more time (same mesh)
+    python ns_staggered_euler.py --fine --scheme central --t-end 240 \\
+        --restart output_ns/fields_central_fine.npz
+
+Pressure Poisson: ``--poisson lu`` (default) factorises the Neumann Laplacian
+once with SuperLU (≈2 ms/solve on 37k cells); ``cg`` and the classic Griebel
+``sor`` are kept as options.
+
 Needs numpy, scipy, matplotlib.
 """
 from __future__ import annotations
@@ -63,7 +75,7 @@ from pathlib import Path
 
 import numpy as np
 from scipy import sparse
-from scipy.sparse.linalg import LinearOperator, cg
+from scipy.sparse.linalg import LinearOperator, cg, splu
 
 import matplotlib
 
@@ -102,33 +114,40 @@ def load_staggered(path: Path) -> dict:
     return out
 
 
-def ensure_staggered_mesh(path: Path, build: bool, quick: bool) -> Path:
+MESH_PRESETS = {
+    # smoke: large d_min, few cells, fast
+    "smoke": dict(d_min=0.05, d_max=0.30, growth_ratio=1.20, max_jump=2.5, a=2.0),
+    # fine: small d_min, many cells — resolves shear layers for shedding
+    "fine": dict(d_min=0.015, d_max=0.12, growth_ratio=1.15, max_jump=2.0, a=None),
+}
+
+
+def ensure_staggered_mesh(
+    path: Path, build: bool, quick: bool, preset: str | None = None
+) -> Path:
     """
     Return path to staggered_*.npz from the known-sizes mesher.
 
-    ``--quick`` still uses mesh_from_known_sizes (O–H multiblock) with a
-    *larger* d_min for smoke tests — never a Cartesian substitute.
+    ``--quick`` → preset 'smoke'; ``--fine`` → preset 'fine'. Both are the
+    same O–H multiblock mesher — never a Cartesian substitute.
     """
     path = Path(path)
-    if path.is_file() and not build and not quick:
+    if preset is None and quick:
+        preset = "smoke"
+    if path.is_file() and not build and preset is None:
         return path
 
     from mesh_from_known_sizes import INPUT, main as mesh_main
 
     I = dict(INPUT)
     tag = "result"
-    if quick:
-        # larger minimum cell → fewer cells, larger Δt, visible wake in smoke test
-        # keep enough room in the channel for BL + O-block (domain |y|≤5)
-        I.update(
-            d_min=0.05,
-            d_max=0.30,
-            growth_ratio=1.20,
-            max_jump=2.5,
-            a=2.0,
-        )
-        tag = "smoke"
+    if preset is not None:
+        I.update(MESH_PRESETS[preset])
+        tag = preset
         path = HERE / "mesh_output" / f"staggered_{tag}.npz"
+        if path.is_file() and not build:
+            print(f"[mesh] reusing {path}")
+            return path
     elif build or not path.is_file():
         tag = "result"
         path = HERE / "mesh_output" / f"staggered_{tag}.npz"
@@ -236,9 +255,11 @@ class GriebelStaggeredNS:
         scheme: str = "donor",
         tau: float = 0.4,
         sor_omega: float = 1.7,
-        poisson: str = "cg",
+        poisson: str = "lu",
         sor_max_it: int = 2000,
         sor_eps: float = 1e-8,
+        perturb: float = 0.1,
+        perturb_T: float = 2.0,
     ) -> None:
         self.S = S
         self.topo = build_topology(S)
@@ -254,6 +275,8 @@ class GriebelStaggeredNS:
         self.poisson = str(poisson).lower()
         self.sor_max_it = int(sor_max_it)
         self.sor_eps = float(sor_eps)
+        self.perturb = float(perturb)
+        self.perturb_T = float(perturb_T)
         self.t = 0.0
 
         Nc, Nf = self.topo["Nc"], self.topo["Nf"]
@@ -261,9 +284,26 @@ class GriebelStaggeredNS:
         self.v = np.zeros(Nc)
         self.p = np.zeros(Nc)
         self.Un = np.zeros(Nf)
+        if self.poisson not in ("lu", "cg", "sor"):
+            raise ValueError("poisson must be lu | cg | sor")
         self._A = self._build_poisson()
         self._M = self._build_preconditioner(self._A)
+        self._lu = self._build_direct(self._A) if self.poisson == "lu" else None
         self._init_solenoidal()
+
+    @staticmethod
+    def _build_direct(A: sparse.csr_matrix):
+        """
+        Sparse LU of the Neumann Laplacian with one dof pinned.
+
+        The pin removes the constant null space; because the un-pinned rows
+        sum to zero, a mean-free RHS is still solved exactly by every row.
+        Factorised once, then each step costs a pair of triangular solves.
+        """
+        Ap = A.tolil(copy=True)
+        Ap[0, :] = 0.0
+        Ap[0, 0] = 1.0
+        return splu(Ap.tocsc(), permc_spec="MMD_AT_PLUS_A")
 
     @staticmethod
     def _build_preconditioner(A: sparse.csr_matrix):
@@ -282,12 +322,46 @@ class GriebelStaggeredNS:
         n = S["face_normals"]
         Un = Un.copy()
         if "inlet" in m:
+            v_in = self._inlet_v()
             Un[m["inlet"]] = (
-                self.U_inf * n[m["inlet"], 0] + 0.0 * n[m["inlet"], 1]
+                self.U_inf * n[m["inlet"], 0] + v_in * n[m["inlet"], 1]
             )
         for w in ("wall_top", "wall_bottom", "cylinder"):
             if w in m:
                 Un[m[w]] = 0.0
+        return Un
+
+    def _inlet_v(self) -> float:
+        """
+        Short transverse inlet pulse v = ε U∞ sin(π t/T) for t < T.
+
+        The O–H mesh is exactly mirror-symmetric, so without a finite
+        perturbation Cl stays identically zero and the wake never sheds.
+        """
+        eps, T = self.perturb, self.perturb_T
+        if eps <= 0.0 or self.t >= T:
+            return 0.0
+        return float(eps * self.U_inf * np.sin(np.pi * self.t / T))
+
+    def _balance_outlet(self, Un: np.ndarray) -> np.ndarray:
+        """
+        Shift the zero-gradient outlet flux so total outflow = total inflow.
+
+        The Neumann Poisson problem is only solvable for a mass-balanced RHS;
+        without this the mean imbalance is left behind as a uniform residual
+        divergence that is largest in the smallest (cylinder) cells.
+        """
+        m = self.topo["masks"]
+        if "outlet" not in m:
+            return Un
+        L = self.S["face_lengths"]
+        out = m["outlet"]
+        bnd = self.S["face_neigh"] < 0
+        others = bnd & ~out
+        Q_other = float(np.sum(Un[others] * L[others]))  # net outward, non-outlet
+        Q_out = float(np.sum(Un[out] * L[out]))
+        Un = Un.copy()
+        Un[out] += -(Q_other + Q_out) / float(np.sum(L[out]))
         return Un
 
     def _gamma(self, dt: float) -> float:
@@ -402,6 +476,11 @@ class GriebelStaggeredNS:
         rhs -= float(np.mean(rhs))
         if self.poisson == "sor":
             return self._sor(rhs)
+        if self.poisson == "lu":
+            rhs[0] = 0.0
+            p = self._lu.solve(rhs)
+            p -= float(np.mean(p))
+            return p, 0
 
         A = self._A
         n = A.shape[0]
@@ -469,8 +548,36 @@ class GriebelStaggeredNS:
         n = S["face_normals"]
         uf = np.full(self.topo["Nf"], self.U_inf)
         vf = np.zeros(self.topo["Nf"])
+        if self.perturb > 0.0:
+            # asymmetric transverse seed in the near wake: the symmetric steady
+            # branch (long Fornberg bubble) is otherwise reached and the
+            # shedding mode takes >100 tU/D to grow from round-off
+            Fc = S["face_centers"]
+            r2 = (Fc[:, 0] - 1.0) ** 2 + Fc[:, 1] ** 2
+            vf += self.perturb * self.U_inf * np.exp(-r2 / 0.5**2)
+            Pc = S["cell_centers"]
+            r2c = (Pc[:, 0] - 1.0) ** 2 + Pc[:, 1] ** 2
+            self.v += self.perturb * self.U_inf * np.exp(-r2c / 0.5**2)
         Un = uf * n[:, 0] + vf * n[:, 1]
         self.Un = self._project_Un(Un, dt=1.0)
+
+    def load_state(self, path: Path) -> list[dict]:
+        """Restart from a ``fields_*.npz``; returns the stored history."""
+        d = np.load(path)
+        if len(d["u"]) != self.topo["Nc"] or len(d["Un"]) != self.topo["Nf"]:
+            raise ValueError(f"{path} does not match this mesh")
+        self.u = d["u"].astype(np.float64)
+        self.v = d["v"].astype(np.float64)
+        self.p = d["p"].astype(np.float64)
+        self.Un = d["Un"].astype(np.float64)
+        self.t = float(d["t"])
+        keys = ("hist_t", "hist_div", "hist_umax", "hist_Cd", "hist_Cl")
+        if not all(k in d.files for k in keys):
+            return []
+        return [
+            dict(t=float(t), max_div=float(dv), max_u=float(um), Cd=float(cd), Cl=float(cl))
+            for t, dv, um, cd, cl in zip(*(d[k] for k in keys))
+        ]
 
     def _project_Un(self, Un_star: np.ndarray, dt: float) -> np.ndarray:
         S, topo = self.S, self.topo
@@ -478,6 +585,7 @@ class GriebelStaggeredNS:
         d_pn = topo["d_pn"]
         interior = topo["masks"]["interior"]
         Un_star = self._enforce_Un_bc(Un_star)
+        Un_star = self._balance_outlet(Un_star)
         div = self._div(Un_star)
         # A p = (ρ/dt) V div   (integrated, like Griebel RHS·volume)
         rhs = (self.rho / dt) * topo["vol"] * div
@@ -515,10 +623,13 @@ class GriebelStaggeredNS:
         gx, gy = self._grad(p_corr)
         self.u = F - (dt / self.rho) * gx
         self.v = G - (dt / self.rho) * gy
-        self.p = self.p + p_corr
+        # F,G carry no old pressure gradient, so the Poisson solution *is*
+        # the pressure at the new level (Griebel eq. 3.38), not an increment
+        self.p = p_corr
         self.Un = Un_new
         self.t += dt
 
+        Cd, Cl = self.force_coefficients()
         return dict(
             t=self.t,
             dt=dt,
@@ -527,10 +638,50 @@ class GriebelStaggeredNS:
             max_u=float(np.max(np.abs(self.u))),
             max_v=float(np.max(np.abs(self.v))),
             poisson=int(self._poisson_info),
+            Cd=Cd,
+            Cl=Cl,
         )
+
+    def force_coefficients(self) -> tuple[float, float]:
+        """
+        Cd, Cl from pressure + wall shear on the cylinder faces.
+
+        Cl oscillating in time is the signature of vortex shedding.
+        """
+        S, topo = self.S, self.topo
+        m = topo["masks"]
+        if "cylinder" not in m:
+            return 0.0, 0.0
+        f = np.where(m["cylinder"])[0]
+        n = S["face_normals"][f]  # points out of fluid (into cylinder)
+        L = S["face_lengths"][f]
+        o = S["face_owner"][f]
+        d = 0.5 * topo["d_pn"][f]
+
+        # pressure acts on body along −(fluid-outward) = +n_body... here n is
+        # owner→face i.e. fluid→solid, so pressure force on body = +p n L
+        Fp_x = np.sum(self.p[o] * n[:, 0] * L)
+        Fp_y = np.sum(self.p[o] * n[:, 1] * L)
+
+        # wall shear: τ = μ ∂u_t/∂n ; velocity at wall = 0
+        tx, ty = -n[:, 1], n[:, 0]
+        ut = self.u[o] * tx + self.v[o] * ty
+        tau = self.rho * self.nu * ut / d
+        # shear force on body opposes fluid motion along tangent
+        Fs_x = np.sum(tau * tx * L)
+        Fs_y = np.sum(tau * ty * L)
+
+        q = 0.5 * self.rho * self.U_inf**2 * S["D"]
+        return float((Fp_x + Fs_x) / q), float((Fp_y + Fs_y) / q)
 
     def speed(self) -> np.ndarray:
         return np.hypot(self.u, self.v)
+
+    def vorticity(self) -> np.ndarray:
+        """ω_z = ∂v/∂x − ∂u/∂y from the Green–Gauss cell gradients."""
+        _, duy = self._grad(self.u)
+        dvx, _ = self._grad(self.v)
+        return dvx - duy
 
 
 # =====================================================================
@@ -549,7 +700,60 @@ def save_fields(path: Path, solver: GriebelStaggeredNS, hist: list) -> None:
         hist_t=np.array([h["t"] for h in hist]),
         hist_div=np.array([h["max_div"] for h in hist]),
         hist_umax=np.array([h["max_u"] for h in hist]),
+        hist_Cd=np.array([h.get("Cd", 0.0) for h in hist]),
+        hist_Cl=np.array([h.get("Cl", 0.0) for h in hist]),
     )
+
+
+def plot_forces(path: Path, hist: list, St_ref: float = 0.18) -> dict:
+    """Cd / Cl history + Strouhal estimate from Cl zero crossings."""
+    t = np.array([h["t"] for h in hist])
+    Cd = np.array([h.get("Cd", 0.0) for h in hist])
+    Cl = np.array([h.get("Cl", 0.0) for h in hist])
+    out = dict(St=None, Cl_amp=0.0, Cd_mean=float(np.mean(Cd[-max(1, len(Cd) // 4):])))
+
+    # analyse last 40% of signal
+    i0 = int(0.6 * len(t))
+    tt, cl = t[i0:], Cl[i0:]
+    if len(tt) > 10:
+        cl0 = cl - np.mean(cl)
+        out["Cl_amp"] = float(0.5 * (cl0.max() - cl0.min()))
+        s = np.sign(cl0)
+        zc = np.where(np.diff(s) > 0)[0]  # upward crossings
+        if len(zc) >= 2 and out["Cl_amp"] > 1e-3:
+            period = float(np.mean(np.diff(tt[zc])))
+            if period > 0:
+                out["St"] = 1.0 / period  # f D / U with D=U=1
+
+    fig, axes = plt.subplots(2, 1, figsize=(9, 5.5), sharex=True)
+    axes[0].plot(t, Cd, color="#8b3a2a")
+    late = Cd[t > min(2.0, 0.5 * t[-1])]  # hide the impulsive-start spike
+    if len(late):
+        pad = 0.1 * max(float(np.ptp(late)), 0.1)
+        axes[0].set_ylim(float(late.min()) - pad, float(late.max()) + pad)
+    axes[0].set_ylabel("Cd")
+    axes[0].grid(True, alpha=0.3)
+    ttl = f"Cd mean (late) = {out['Cd_mean']:.3f}"
+    axes[0].set_title(ttl, loc="left", fontsize=10)
+    axes[1].plot(t, Cl, color="#1f4e79")
+    late = Cl[t > min(2.0, 0.5 * t[-1])]
+    if len(late):
+        lim = 1.2 * max(float(np.abs(late).max()), 0.05)
+        axes[1].set_ylim(-lim, lim)
+    axes[1].axhline(0, color="0.5", lw=0.8)
+    axes[1].set_ylabel("Cl")
+    axes[1].set_xlabel("t U / D")
+    axes[1].grid(True, alpha=0.3)
+    st_txt = f"St ≈ {out['St']:.3f}" if out["St"] else "St: n/a"
+    axes[1].set_title(
+        f"Cl amplitude = {out['Cl_amp']:.3f}   {st_txt}   (ref ≈ {St_ref})",
+        loc="left",
+        fontsize=10,
+    )
+    fig.tight_layout()
+    fig.savefig(path, dpi=130)
+    plt.close(fig)
+    return out
 
 
 def _wake_field(solver: GriebelStaggeredNS) -> tuple[np.ndarray, str]:
@@ -567,6 +771,7 @@ def _draw_field(
     field: np.ndarray,
     vlim: float | None = None,
     cmap: str = "RdBu_r",
+    quiver: bool = True,
 ):
     S = solver.S
     if vlim is None:
@@ -588,21 +793,22 @@ def _draw_field(
         mappable = ax.scatter(
             P[:, 0], P[:, 1], c=field, s=3, cmap=cmap, vmin=-vlim, vmax=vlim
         )
-    # sparse velocity arrows so motion direction is obvious
-    P = S["cell_centers"]
-    step = max(len(P) // 400, 1)
-    idx = np.arange(0, len(P), step)
-    ax.quiver(
-        P[idx, 0],
-        P[idx, 1],
-        solver.u[idx],
-        solver.v[idx],
-        color="k",
-        alpha=0.35,
-        scale=25,
-        width=0.0025,
-        zorder=4,
-    )
+    if quiver:
+        # sparse velocity arrows so motion direction is obvious
+        P = S["cell_centers"]
+        step = max(len(P) // 400, 1)
+        idx = np.arange(0, len(P), step)
+        ax.quiver(
+            P[idx, 0],
+            P[idx, 1],
+            solver.u[idx],
+            solver.v[idx],
+            color="k",
+            alpha=0.35,
+            scale=25,
+            width=0.0025,
+            zorder=4,
+        )
     ax.add_patch(
         plt.Circle((S["xc"], S["yc"]), S["D"] / 2, fc="white", ec="k", lw=1.2, zorder=5)
     )
@@ -616,20 +822,24 @@ def save_wake_frame(path: Path, solver: GriebelStaggeredNS, vlim: float = 0.8) -
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     field, label = _wake_field(solver)
-    fig, ax = plt.subplots(figsize=(9.5, 4.0))
-    m = _draw_field(ax, solver, field, vlim=vlim)
-    ax.set_title(
+    fig, (ax0, ax1) = plt.subplots(2, 1, figsize=(9.5, 7.6), sharex=True)
+    # vorticity: the von Kármán street shows as alternating-sign blobs
+    m0 = _draw_field(ax0, solver, solver.vorticity(), vlim=3.0, quiver=False)
+    ax0.set_title(
         f"Re={solver.Re:g}  scheme={solver.scheme}  tU/D={solver.t:.2f}  "
         f"cells={solver.topo['Nc']:,}  d_min={solver.S['d_min']:g}",
         loc="left",
         fontsize=10,
         fontweight="bold",
     )
-    ax.set_xlabel("x")
-    ax.set_ylabel("y")
-    fig.colorbar(m, ax=ax, fraction=0.046, pad=0.02, label=label)
+    ax0.set_ylabel("y")
+    fig.colorbar(m0, ax=ax0, fraction=0.046, pad=0.02, label=r"$\omega_z D/U_\infty$")
+    m1 = _draw_field(ax1, solver, field, vlim=vlim)
+    ax1.set_xlabel("x")
+    ax1.set_ylabel("y")
+    fig.colorbar(m1, ax=ax1, fraction=0.046, pad=0.02, label=label)
     fig.tight_layout()
-    fig.savefig(path, dpi=110, bbox_inches="tight")
+    fig.savefig(path, dpi=100, bbox_inches="tight")
     plt.close(fig)
     return path
 
@@ -660,10 +870,24 @@ def plot_solution(path: Path, solver: GriebelStaggeredNS, hist: list) -> None:
     plt.close(fig)
 
 
-def build_gif(frames: list[Path], gif_path: Path, fps: int = 8) -> Path:
+def frame_time(path: Path) -> float:
+    """Parse t from ``wake_{k:05d}_t{t:08.4f}.png``."""
+    try:
+        return float(path.stem.split("_t")[-1])
+    except ValueError:
+        return 0.0
+
+
+def build_gif(
+    frames: list[Path], gif_path: Path, fps: int = 8, max_frames: int = 60
+) -> tuple[Path, int]:
     from viz import save_wake_gif
 
-    return save_wake_gif(frames, gif_path, fps=fps, max_width=900)
+    # cap the frame count so a long run does not produce a 20 MB GIF
+    if len(frames) > max_frames:
+        idx = np.linspace(0, len(frames) - 1, max_frames).round().astype(int)
+        frames = [frames[i] for i in sorted(set(idx.tolist()))]
+    return save_wake_gif(frames, gif_path, fps=fps, max_width=640), len(frames)
 
 
 # =====================================================================
@@ -693,6 +917,14 @@ def parse_args():
         help="smoke mesh with larger d_min (O–H multiblock, visible wake)",
     )
     p.add_argument(
+        "--fine",
+        action="store_true",
+        help=(
+            "finer known-sizes mesh (d_min=0.015, more cells) that resolves "
+            "the shear layers so von Kármán shedding develops"
+        ),
+    )
+    p.add_argument(
         "--scheme",
         choices=("central", "upwind", "donor"),
         default="donor",
@@ -710,9 +942,21 @@ def parse_args():
     p.add_argument("--tau", type=float, default=0.4)
     p.add_argument(
         "--poisson",
-        choices=("cg", "sor"),
-        default="cg",
-        help="pressure solver (SOR = classic Griebel; CG for large meshes)",
+        choices=("lu", "cg", "sor"),
+        default="lu",
+        help=(
+            "pressure solver: lu = sparse direct (fast, exact), "
+            "cg = Jacobi-PCG, sor = classic Griebel SOR"
+        ),
+    )
+    p.add_argument(
+        "--perturb",
+        type=float,
+        default=0.1,
+        help=(
+            "shedding trigger amplitude (×U∞): near-wake v seed at t=0 plus a "
+            "transverse inlet pulse for t<2; 0 = off (symmetric steady wake)"
+        ),
     )
     p.add_argument("--sor-eps", type=float, default=1e-8)
     p.add_argument("--sor-max-it", type=int, default=2000)
@@ -720,8 +964,24 @@ def parse_args():
     p.add_argument("--gif", action="store_true", default=True)
     p.add_argument("--no-gif", action="store_true")
     p.add_argument("--gif-fps", type=int, default=8)
+    p.add_argument(
+        "--gif-from",
+        type=float,
+        default=None,
+        help=(
+            "only frames with t ≥ this go into the GIF; pick t_end − k·(1/St) "
+            "so the looping GIF covers k whole shedding periods"
+        ),
+    )
+    p.add_argument("--gif-max-frames", type=int, default=60)
     p.add_argument("--frame-every", type=int, default=2)
     p.add_argument("--demo", action="store_true")
+    p.add_argument(
+        "--restart",
+        type=str,
+        default=None,
+        help="continue from a fields_*.npz of a previous run (same mesh)",
+    )
     return p.parse_args()
 
 
@@ -731,8 +991,9 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     write_gif = bool(args.gif) and not bool(args.no_gif)
 
+    preset = "fine" if args.fine else None
     mesh_path = ensure_staggered_mesh(
-        Path(args.mesh), build=args.build_mesh, quick=args.quick
+        Path(args.mesh), build=args.build_mesh, quick=args.quick, preset=preset
     )
     S = load_staggered(mesh_path)
     solver = GriebelStaggeredNS(
@@ -744,6 +1005,7 @@ def main():
         poisson=args.poisson,
         sor_eps=args.sor_eps,
         sor_max_it=args.sor_max_it,
+        perturb=args.perturb,
     )
 
     # smoke defaults: large d_min mesh + enough physical time for a wake
@@ -757,6 +1019,14 @@ def main():
             n_steps = 10000  # safety cap; t_end usually stops first
         if args.frame_every == 2:
             every = 8
+    elif args.fine:
+        # shedding needs ~20 convective units to trigger plus several periods
+        if t_end is None:
+            t_end = 120.0
+        if args.steps == 50:
+            n_steps = 200000
+        if args.frame_every == 2:
+            every = 40
 
     print("=" * 72)
     print("GRIEBEL NS on known-sizes staggered mesh")
@@ -779,25 +1049,32 @@ def main():
         print(f"GIF      : every {every} steps @ {args.gif_fps} fps")
     print("-" * 72)
 
-    for old in out.glob("wake_*.png"):
-        old.unlink()
-
     hist: list[dict] = []
     frames: list[Path] = []
+    if args.restart:
+        hist = solver.load_state(Path(args.restart))
+        frames = sorted(out.glob("wake_*.png"))
+        print(f"restart  : {args.restart}  t={solver.t:.3f}  ({len(hist)} steps, {len(frames)} frames kept)")
+    else:
+        for old in out.glob("wake_*.png"):
+            old.unlink()
+    k0 = len(hist)
+    n_steps += k0
     t0 = time.time()
-    k = 0
+    k = k0
     while True:
         k += 1
         info = solver.step(args.dt)
         hist.append(info)
-        if write_gif and (k == 1 or k % every == 0):
+        if write_gif and (k == k0 + 1 or k % every == 0):
             fp = out / f"wake_{k:05d}_t{solver.t:08.4f}.png"
             frames.append(save_wake_frame(fp, solver))
-        if k == 1 or k % max(1, 20) == 0:
+        if k == k0 + 1 or k % max(1, 20) == 0:
             print(
                 f"step {k:5d}  t={info['t']:.4f}  dt={info['dt']:.4g}  "
                 f"γ={info['gamma']:.3f}  max|div|={info['max_div']:.3e}  "
-                f"max|u|={info['max_u']:.3f}"
+                f"max|u|={info['max_u']:.3f}  Cd={info['Cd']:.3f}  "
+                f"Cl={info['Cl']:+.3f}"
             )
         done = k >= n_steps or (t_end is not None and solver.t >= t_end)
         if done:
@@ -807,21 +1084,34 @@ def main():
             print(
                 f"step {k:5d}  t={info['t']:.4f}  dt={info['dt']:.4g}  "
                 f"γ={info['gamma']:.3f}  max|div|={info['max_div']:.3e}  "
-                f"max|u|={info['max_u']:.3f}"
+                f"max|u|={info['max_u']:.3f}  Cd={info['Cd']:.3f}  "
+                f"Cl={info['Cl']:+.3f}"
             )
             break
 
     elapsed = time.time() - t0
     print("-" * 72)
-    print(f"done in {elapsed:.2f}s  ({elapsed / k * 1000:.1f} ms/step)  t={solver.t:.3f}")
+    print(
+        f"done in {elapsed:.2f}s  ({elapsed / max(k - k0, 1) * 1000:.1f} ms/step)"
+        f"  t={solver.t:.3f}"
+    )
 
-    tag = f"{solver.scheme}_{'quick' if args.quick else 'run'}"
+    mesh_tag = "quick" if args.quick else ("fine" if args.fine else "run")
+    tag = f"{solver.scheme}_{mesh_tag}"
     fields = out / f"fields_{tag}.npz"
     plot = out / f"plot_{tag}.png"
+    forces = out / f"forces_{tag}.png"
     save_fields(fields, solver, hist)
     plot_solution(plot, solver, hist)
+    fstat = plot_forces(forces, hist)
     print(f"wrote {fields}")
     print(f"wrote {plot}")
+    print(f"wrote {forces}")
+    st_txt = f"{fstat['St']:.3f}" if fstat["St"] else "n/a"
+    print(
+        f"forces   : Cd_mean={fstat['Cd_mean']:.3f}  "
+        f"Cl_amp={fstat['Cl_amp']:.3f}  St={st_txt} (ref ≈0.18)"
+    )
 
     gif_path = None
     if write_gif and frames:
@@ -831,10 +1121,17 @@ def main():
             if f not in seen:
                 uniq.append(f)
                 seen.add(f)
+        gif_from = args.gif_from
+        if gif_from is None and args.fine and t_end is not None:
+            gif_from = t_end - 20.0  # ≈4 shedding periods → seamless loop
+        if gif_from is not None:
+            uniq = [f for f in uniq if frame_time(f) >= gif_from] or uniq
         gif_path = out / f"cylinder_wake_{solver.scheme}.gif"
-        build_gif(uniq, gif_path, fps=int(args.gif_fps))
+        _, n_used = build_gif(
+            uniq, gif_path, fps=int(args.gif_fps), max_frames=int(args.gif_max_frames)
+        )
         print(
-            f"wrote {gif_path}  ({len(uniq)} frames, "
+            f"wrote {gif_path}  ({n_used} of {len(uniq)} frames, "
             f"{gif_path.stat().st_size / 1e6:.2f} MB)"
         )
         if args.demo:
