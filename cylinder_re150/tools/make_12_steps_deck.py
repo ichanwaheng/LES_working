@@ -17,8 +17,8 @@ from pptx.util import Inches, Pt, Emu
 from pptx.dml.color import RGBColor
 from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
 
-ROOT = Path("/workspace/cylinder_re150")
-ART = Path("/opt/cursor/artifacts")
+ROOT = Path(__file__).resolve().parents[1]
+ART = ROOT / "demo"
 TMP = Path("/tmp/ppt_assets"); TMP.mkdir(exist_ok=True)
 OUT = ROOT / "demo" / "ns_staggered_12_steps.pptx"
 
@@ -228,7 +228,7 @@ s = prs.slides.add_slide(BLANK); n += 1
 add_title(s, "STEP 1", "What we solve, and where the unknowns sit")
 add_eq(s, r"\nabla\cdot\mathbf{u}=0,\qquad \frac{\partial\mathbf{u}}{\partial t}+\nabla\cdot(\mathbf{u}\otimes\mathbf{u})=-\nabla p+\nu\nabla^2\mathbf{u},\qquad \nu=\frac{1}{Re},\ Re=150", Inches(0.6), Inches(1.3), height=Inches(0.6), max_width=Inches(6.4))
 add_bullets(s, [
-    "Mesh from mesh_from_known_sizes.py: O-ring + transition + Cartesian blocks, 37,044 cells (d_min = 0.015)",
+    "Mesh from mesh_from_known_sizes.py: O-ring + transition + Cartesian blocks, 26,444 cells (d_min = 0.015)",
     "No i, j — a cell knows its neighbours only through its faces (owner / neighbour arrays)",
     "Staggered (MAC): p, u, v at cell centres P;  U_n = u·n on face centres f",
     "The pressure difference across a face and the velocity through it sit in the same place → no checkerboard",
@@ -360,7 +360,7 @@ def _balance_outlet(Un):            # make rhs.sum() == 0
     Un[outlet] += -(Q_other + Q_out) / np.sum(L[outlet])
     return Un""", Inches(0.6), Inches(1.35), Inches(7.6), Inches(3.3), size=12)
 add_bullets(s, [
-    "inlet x = −10 D: u = U∞ (+ a short transverse pulse, Step 10);  outlet x = +30 D: ∂u/∂n = 0;  walls y = ±5 D and cylinder: u = 0",
+    "inlet x = 0: u = U∞ (+ a short transverse pulse, Step 10);  outlet x = 24 D: ∂u/∂n = 0;  walls y = 0, 12 D and cylinder (centre 6 D, 6 D): u = 0",
     "A zero-gradient outlet does not automatically let out what came in",
 ], Inches(0.6), Inches(4.9), Inches(7.6), Inches(1.6), size=14)
 add_note(s, "What we saw without _balance_outlet: the solver ran, but max|div| sat at 1e-2, largest in the tiny cells on the cylinder — the unbalanced mass was spread over the domain as a constant divergence.\n\nWith it: max|div| = 1e-12.", Inches(8.5), Inches(1.5), Inches(4.4), Inches(3.0), size=14)
@@ -418,12 +418,12 @@ add_bullets(s, [
     "The O–H mesh is exactly mirror-symmetric about y = 0, and so is every operator above → a symmetric start stays symmetric",
     "Cl printed as −0.000 for 120 time units while the wake grew into the long, steady, unstable symmetric bubble",
     "Only at tU/D ≈ 120 had round-off grown enough (×10¹³) to start the oscillation — the left plot",
-    "A small seed one diameter behind the cylinder brings the onset to tU/D ≈ 20 — the right plot; both end on the same limit cycle (Cl ± 0.75)",
+    "A small seed one diameter behind the cylinder brings the onset to tU/D ≈ 20 — the right plot; both end on the same limit cycle (earlier 40 D × 10 D domain; Cl ± 0.75)",
 ], Inches(0.6), Inches(1.3), Inches(12), Inches(2.2), size=14)
 add_code(s, """r2 = (P[:, 0] - 1.0)**2 + P[:, 1]**2
 v += perturb * U_inf * np.exp(-r2 / 0.5**2)    # perturb = 0.1  (--perturb)""", Inches(0.6), Inches(3.45), Inches(7.0), Inches(0.75), size=12)
-add_pic(s, ART / "forces_central_fine.png", Inches(0.6), Inches(4.3), height=Inches(2.65))
-add_pic(s, ART / "forces_central_fine_default_run.png", Inches(6.9), Inches(4.3), height=Inches(2.65))
+add_pic(s, ART / "forces_noseed_40x10.png", Inches(0.6), Inches(4.3), height=Inches(2.65))
+add_pic(s, ART / "forces_seed_40x10.png", Inches(6.9), Inches(4.3), height=Inches(2.65))
 footer(s, n)
 
 # 12 loop + results
@@ -447,12 +447,12 @@ add_code(s, """while t < t_end:
     if step % 100 == 0: save_frame(u, v, t)               # Step 12""", Inches(0.6), Inches(1.35), Inches(7.2), Inches(5.2), size=11)
 add_bullets(s, [
     "Forces: Σ_cyl p n L (pressure) + ν u_t/(d/2) (wall shear), over ½ρU∞²D",
-    "Fine mesh, central: after the impulsive transient Cl grows exponentially and saturates at ± 0.75 by tU/D ≈ 30",
-    "Period 1/St ≈ 4.8 → St ≈ 0.20–0.21;  Cd ≈ 1.64 oscillating at twice the lift frequency",
-    "Unbounded-cylinder references: St ≈ 0.18, Cd ≈ 1.33 — the 10 % blockage of the ±5 D channel and first-order Euler push both up",
+    "Fine mesh, central: after the impulsive transient Cl grows exponentially and saturates at ± 0.71 by tU/D ≈ 30",
+    "Period 1/St ≈ 4.8 → St ≈ 0.21;  Cd ≈ 1.56 oscillating at twice the lift frequency",
+    "Unbounded-cylinder references: St ≈ 0.18, Cd ≈ 1.33 — the 8.3 % blockage of the 12 D-high channel and first-order Euler push both up",
     "Cost: 12 ms/step, 37k cells, 26,600 steps → ≈ 6 min to tU/D = 120",
 ], Inches(8.0), Inches(1.4), Inches(5.0), Inches(4.5), size=13)
-add_code(s, """forces   : Cd_mean=1.643  Cl_amp=0.751  St=0.213""", Inches(8.0), Inches(5.9), Inches(5.0), Inches(0.5), size=11)
+add_code(s, """forces   : Cd_mean=1.564  Cl_amp=0.712  St=0.207""", Inches(8.0), Inches(5.9), Inches(5.0), Inches(0.5), size=11)
 footer(s, n)
 
 # 13 pictures
@@ -464,7 +464,7 @@ idx = np.arange(0, Nc, Nc // 400)                              # ~400 sampled ce
 ax.quiver(P[idx, 0], P[idx, 1], u[idx], v[idx])                 # velocity vector there""", Inches(0.6), Inches(1.35), Inches(6.6), Inches(1.4), size=12)
 add_bullets(s, [
     "Top: vorticity ω_z = ∂v/∂x − ∂u/∂y from the Green–Gauss gradient of Step 8 — red / blue = the two senses of rotation",
-    "Bottom: u − U∞ — free stream white, wake (slower) blue, shoulders (faster) red; arrows = (u_P, v_P) in the sampled cells",
+    "Bottom, 'Velocity plot': the speed |u| — free stream ≈ 1, wake (slow) dark, shoulders (fast) bright; arrows = (u_P, v_P) in the sampled cells",
     "One frame every 100 steps (≈ 0.45 time units, ~11 per shedding period); GIF loops the last ~4 periods, MP4 is the whole history",
     "Nothing is traced between frames: the next frame is simply the next saved state, coloured and arrowed again",
     "No streamlines. An arrow is the local velocity vector at that instant, not a path",
@@ -486,7 +486,7 @@ rows = [
     ("8", "Solve (LU) and correct", "faces first, then cells"),
     ("9", "Δt = τ·min(h/u, Re h²/4)", "0.0045 on the fine mesh"),
     ("10", "Symmetric start + seed", "shedding by tU/D ≈ 20–30"),
-    ("11", "Loop, Cd / Cl", "Cl ±0.75, St 0.20, Cd 1.64"),
+    ("11", "Loop, Cd / Cl", "Cl ±0.71, St 0.21, Cd 1.56"),
     ("12", "Snapshots", "cell colour + arrows, no streamlines"),
 ]
 tbl = s.shapes.add_table(len(rows) + 1, 3, Inches(0.6), Inches(1.3), Inches(12.1), Inches(5.4)).table
