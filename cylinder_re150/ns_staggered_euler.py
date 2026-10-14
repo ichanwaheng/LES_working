@@ -552,11 +552,12 @@ class GriebelStaggeredNS:
             # asymmetric transverse seed in the near wake: the symmetric steady
             # branch (long Fornberg bubble) is otherwise reached and the
             # shedding mode takes >100 tU/D to grow from round-off
+            x0, y0 = S["xc"] + S["D"], S["yc"]  # one diameter behind the cylinder
             Fc = S["face_centers"]
-            r2 = (Fc[:, 0] - 1.0) ** 2 + Fc[:, 1] ** 2
+            r2 = (Fc[:, 0] - x0) ** 2 + (Fc[:, 1] - y0) ** 2
             vf += self.perturb * self.U_inf * np.exp(-r2 / 0.5**2)
             Pc = S["cell_centers"]
-            r2c = (Pc[:, 0] - 1.0) ** 2 + Pc[:, 1] ** 2
+            r2c = (Pc[:, 0] - x0) ** 2 + (Pc[:, 1] - y0) ** 2
             self.v += self.perturb * self.U_inf * np.exp(-r2c / 0.5**2)
         Un = uf * n[:, 0] + vf * n[:, 1]
         self.Un = self._project_Un(Un, dt=1.0)
@@ -757,12 +758,8 @@ def plot_forces(path: Path, hist: list, St_ref: float = 0.18) -> dict:
 
 
 def _wake_field(solver: GriebelStaggeredNS) -> tuple[np.ndarray, str]:
-    """
-    Streamwise perturbation u − U∞ (shows recirculation / wake clearly).
-
-    Raw |U|≈U∞ everywhere looks static; the deficit makes flow visible.
-    """
-    return solver.u - solver.U_inf, r"$u - U_\infty$"
+    """Velocity magnitude |u| at the cell centres (the 'velocity plot')."""
+    return np.hypot(solver.u, solver.v), "velocity"
 
 
 def _draw_field(
@@ -772,26 +769,34 @@ def _draw_field(
     vlim: float | None = None,
     cmap: str = "RdBu_r",
     quiver: bool = True,
+    vmin: float | None = None,
 ):
+    """
+    Colour every cell by ``field``. Symmetric range [-vlim, vlim] by default
+    (vorticity); pass ``vmin=0`` for a one-sided field such as |u|.
+    """
     S = solver.S
     if vlim is None:
         vlim = float(np.percentile(np.abs(field), 98))
         vlim = max(vlim, 0.15)
+    lo = -vlim if vmin is None else vmin
     if "quads" in S:
+        # edgecolors="face" hides the antialiasing seams between quads that
+        # otherwise show up as a white lattice on the curved O-block
         coll = PolyCollection(
             S["quads"],
             array=field,
             cmap=cmap,
-            edgecolors="none",
-            linewidths=0,
+            edgecolors="face",
+            linewidths=0.3,
         )
-        coll.set_clim(-vlim, vlim)
+        coll.set_clim(lo, vlim)
         ax.add_collection(coll)
         mappable = coll
     else:
         P = S["cell_centers"]
         mappable = ax.scatter(
-            P[:, 0], P[:, 1], c=field, s=3, cmap=cmap, vmin=-vlim, vmax=vlim
+            P[:, 0], P[:, 1], c=field, s=3, cmap=cmap, vmin=lo, vmax=vlim
         )
     if quiver:
         # sparse velocity arrows so motion direction is obvious
@@ -818,26 +823,33 @@ def _draw_field(
     return mappable
 
 
-def save_wake_frame(path: Path, solver: GriebelStaggeredNS, vlim: float = 0.8) -> Path:
+def _draw_vorticity(ax, solver: GriebelStaggeredNS):
+    return _draw_field(ax, solver, solver.vorticity(), vlim=3.0, quiver=False)
+
+
+def _draw_velocity(ax, solver: GriebelStaggeredNS, vmax: float):
+    field, _ = _wake_field(solver)
+    return _draw_field(ax, solver, field, vlim=vmax, cmap="viridis", vmin=0.0)
+
+
+def save_wake_frame(path: Path, solver: GriebelStaggeredNS, vmax: float = 1.6) -> Path:
+    """
+    Two panels, titled only by plot type: 'Vorticity plot' (ω_z D/U∞, the
+    von Kármán street shows as alternating-sign blobs) and 'Velocity plot'
+    (|u|/U∞ with sparse direction arrows).
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    field, label = _wake_field(solver)
     fig, (ax0, ax1) = plt.subplots(2, 1, figsize=(9.5, 7.6), sharex=True)
-    # vorticity: the von Kármán street shows as alternating-sign blobs
-    m0 = _draw_field(ax0, solver, solver.vorticity(), vlim=3.0, quiver=False)
-    ax0.set_title(
-        f"Re={solver.Re:g}  scheme={solver.scheme}  tU/D={solver.t:.2f}  "
-        f"cells={solver.topo['Nc']:,}  d_min={solver.S['d_min']:g}",
-        loc="left",
-        fontsize=10,
-        fontweight="bold",
-    )
+    m0 = _draw_vorticity(ax0, solver)
+    ax0.set_title("Vorticity plot", loc="left", fontsize=11, fontweight="bold")
     ax0.set_ylabel("y")
-    fig.colorbar(m0, ax=ax0, fraction=0.046, pad=0.02, label=r"$\omega_z D/U_\infty$")
-    m1 = _draw_field(ax1, solver, field, vlim=vlim)
+    fig.colorbar(m0, ax=ax0, fraction=0.046, pad=0.02, label="vorticity")
+    m1 = _draw_velocity(ax1, solver, vmax)
+    ax1.set_title("Velocity plot", loc="left", fontsize=11, fontweight="bold")
     ax1.set_xlabel("x")
     ax1.set_ylabel("y")
-    fig.colorbar(m1, ax=ax1, fraction=0.046, pad=0.02, label=label)
+    fig.colorbar(m1, ax=ax1, fraction=0.046, pad=0.02, label="velocity")
     fig.tight_layout()
     fig.savefig(path, dpi=100, bbox_inches="tight")
     plt.close(fig)
@@ -846,15 +858,11 @@ def save_wake_frame(path: Path, solver: GriebelStaggeredNS, vlim: float = 0.8) -
 
 def plot_solution(path: Path, solver: GriebelStaggeredNS, hist: list) -> None:
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-    field, label = _wake_field(solver)
-    m = _draw_field(axes[0], solver, field)
-    axes[0].set_title(
-        f"wake  scheme={solver.scheme}  t={solver.t:.3f}  cells={solver.topo['Nc']:,}",
-        loc="left",
-        fontsize=10,
-        fontweight="bold",
-    )
-    fig.colorbar(m, ax=axes[0], fraction=0.046, pad=0.04, label=label)
+    m = _draw_velocity(axes[0], solver, vmax=1.6)
+    axes[0].set_title("Velocity plot", loc="left", fontsize=11, fontweight="bold")
+    axes[0].set_xlabel("x")
+    axes[0].set_ylabel("y")
+    fig.colorbar(m, ax=axes[0], fraction=0.046, pad=0.04, label="velocity")
     axes[1].semilogy(
         [h["t"] for h in hist],
         [max(h["max_div"], 1e-16) for h in hist],
