@@ -406,7 +406,7 @@ transient, \(C_l\) grows exponentially, saturates at \(\pm0.75\) by
 \(tU/D\approx30\) with period \(1/St\approx4.8\) (\(St\approx0.20\)–\(0.21\)), \(C_d\)
 oscillates at twice that frequency around 1.64. Reference values for an
 unbounded cylinder are \(St\approx0.18\), \(C_d\approx1.33\); the 10 %
-blockage of the ±5D channel and the first-order time scheme push both up.
+blockage of the 12 D-high channel and the first-order time scheme push both up.
 
 ---
 
@@ -424,8 +424,8 @@ ax.quiver(P[idx, 0], P[idx, 1], u[idx], v[idx])                  # the velocity 
 * top panel: \(\omega_z=\partial_xv-\partial_yu\), from the same Green–Gauss
   gradient as Step 8 — red and blue are the two senses of rotation, so the
   alternating street is unmistakable;
-* bottom panel: \(u-U_\infty\), so the free stream is white and the wake
-  (slower) is blue, the shoulders (faster) red; arrows are \((u_P,v_P)\) in
+* bottom panel ("Velocity plot"): the speed \(|\mathbf{u}|\), so the wake
+  (slow) is dark and the shoulders (fast) bright; arrows are \((u_P,v_P)\) in
   the sampled cells.
 
 A frame is saved every 100 steps (≈0.45 time units, ~11 per shedding

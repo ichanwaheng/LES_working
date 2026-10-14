@@ -1,8 +1,9 @@
 """Build the beginner's reproducible walkthrough deck."""
 import sys
-sys.path.insert(0, "/tmp")
-sys.path.insert(0, "/workspace/cylinder_re150")
 from pathlib import Path
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE.parent))
 
 import numpy as np
 import matplotlib
@@ -15,8 +16,8 @@ from pptx.util import Inches, Pt
 from pptx.enum.text import PP_ALIGN
 from pptkit import Deck, NAVY, GREY, ACC, GREEN, LIGHT, TMP
 
-ROOT = Path("/workspace/cylinder_re150")
-ART = Path("/opt/cursor/artifacts")
+ROOT = HERE.parent
+ART = ROOT / "demo"
 OUT = ROOT / "demo" / "ns_staggered_tutorial.pptx"
 
 I = Inches
@@ -25,20 +26,20 @@ I = Inches
 # ====================================================================== assets
 def sketch_domain():
     p = TMP / "sk_domain.png"
-    fig, ax = plt.subplots(figsize=(9, 2.9))
-    ax.add_patch(Rectangle((-10, -5), 40, 10, fc="#eef2f7", ec="k", lw=1.5))
-    ax.add_patch(Circle((0, 0), 0.5, fc="#cccccc", ec="k", lw=1.5))
-    ax.text(0, 1.0, "cylinder D = 1\nno-slip", ha="center", fontsize=10)
-    ax.text(-10.3, 0, "inlet\nu = U∞ = 1\nv = 0", ha="right", va="center", fontsize=10, color="#2a7f3a")
-    ax.text(30.3, 0, "outlet\n∂u/∂n = 0\n∂v/∂n = 0", ha="left", va="center", fontsize=10, color="#B23A2A")
-    ax.text(10, 5.4, "wall_top: u = v = 0", ha="center", fontsize=10)
-    ax.text(10, -5.9, "wall_bottom: u = v = 0", ha="center", fontsize=10)
-    for y in (-3, -1.5, 1.5, 3):
-        ax.add_patch(FancyArrowPatch((-9.5, y), (-7.5, y), arrowstyle="->", mutation_scale=12, color="#2a7f3a"))
-    ax.text(15, -2.5, "x ∈ [−10, 30],  y ∈ [−5, 5]   (all lengths in D)", fontsize=10, ha="center")
-    ax.text(15, 2.5, "Re = U∞ D / ν = 150   →   ν = 1/150", fontsize=10, ha="center")
-    ax.set_xlim(-14, 36); ax.set_ylim(-7, 7); ax.set_aspect("equal"); ax.axis("off")
-    fig.tight_layout(); fig.savefig(p, dpi=200, transparent=True); plt.close(fig); return p
+    fig, ax = plt.subplots(figsize=(10, 5.2))
+    ax.add_patch(Rectangle((0, 0), 24, 12, fc="#eef2f7", ec="k", lw=1.5))
+    ax.add_patch(Circle((6, 6), 0.5, fc="#cccccc", ec="k", lw=1.5))
+    ax.text(6, 3.4, "cylinder D = 1\nat (6 D, 6 D), no-slip", ha="center", fontsize=12)
+    ax.text(-0.3, 6, "inlet (x = 0)\nu = U∞ = 1\nv = 0", ha="right", va="center", fontsize=12, color="#2a7f3a")
+    ax.text(24.3, 6, "outlet (x = 24)\n∂u/∂n = 0\n∂v/∂n = 0", ha="left", va="center", fontsize=12, color="#B23A2A")
+    ax.text(12, 12.4, "wall_top (y = 12): u = v = 0", ha="center", fontsize=12)
+    ax.text(12, -0.9, "wall_bottom (y = 0): u = v = 0", ha="center", fontsize=12)
+    for y in (2.5, 4.5, 7.5, 9.5):
+        ax.add_patch(FancyArrowPatch((0.5, y), (2.5, y), arrowstyle="->", mutation_scale=16, color="#2a7f3a"))
+    ax.text(17, 1.6, "x ∈ [0, 24],  y ∈ [0, 12]  (lengths in D)", fontsize=12, ha="center")
+    ax.text(17, 10.2, "Re = U∞ D / ν = 150  →  ν = 1/150", fontsize=12, ha="center")
+    ax.set_xlim(-5.5, 29.5); ax.set_ylim(-1.6, 13.4); ax.set_aspect("equal"); ax.axis("off")
+    fig.savefig(p, dpi=200, transparent=True, bbox_inches="tight", pad_inches=0.02); plt.close(fig); return p
 
 
 def sketch_bl():
@@ -142,18 +143,19 @@ def near_wake_zoom():
     import ns_staggered_euler as m
     S = m.load_staggered(ROOT / "mesh_output" / "staggered_fine.npz")
     s = m.GriebelStaggeredNS(S, Re=150, scheme="central")
-    s.load_state(ROOT / "output_ns" / "fine_central" / "fields_central_fine.npz")
+    s.load_state(ROOT / "output_ns" / "fine_24x12" / "fields_central_fine.npz")
+    xc, yc = S["xc"], S["yc"]
     fig, axes = plt.subplots(1, 2, figsize=(11, 4.6))
-    for ax, (f, lab, vl) in zip(axes, [(s.u - 1, r"$u-U_\infty$ (cell values, mesh edges drawn)", 0.8), (s.vorticity(), r"$\omega_z$", 3)]):
-        c = PolyCollection(S["quads"], array=f, cmap="RdBu_r", edgecolors="k", linewidths=0.08); c.set_clim(-vl, vl); ax.add_collection(c)
-        ax.add_patch(Circle((0, 0), 0.5, fc="white", ec="k"))
-        ax.set_xlim(-0.9, 2.6); ax.set_ylim(-1.2, 1.2); ax.set_aspect("equal"); ax.set_title(lab, fontsize=11)
+    for ax, (f, lab, lo, hi, cm) in zip(axes, [(np.hypot(s.u, s.v), "Velocity plot (cell values, mesh edges drawn)", 0.0, 1.6, "viridis"), (s.vorticity(), "Vorticity plot", -3, 3, "RdBu_r")]):
+        c = PolyCollection(S["quads"], array=f, cmap=cm, edgecolors="k", linewidths=0.08); c.set_clim(lo, hi); ax.add_collection(c)
+        ax.add_patch(Circle((xc, yc), 0.5, fc="white", ec="k"))
+        ax.set_xlim(xc - 0.9, xc + 2.6); ax.set_ylim(yc - 1.2, yc + 1.2); ax.set_aspect("equal"); ax.set_title(lab, fontsize=11)
     fig.tight_layout(); fig.savefig(p, dpi=150); plt.close(fig); return p
 
 
 def dt_history():
     p = TMP / "dt_hist.png"
-    d = np.load(ROOT / "output_ns" / "fine_default" / "fields_central_fine.npz")
+    d = np.load(ROOT / "output_ns" / "fine_24x12" / "fields_central_fine.npz")
     t = d["hist_t"]; dt = np.diff(t)
     fig, ax = plt.subplots(figsize=(6, 2.6))
     ax.plot(t[1:], dt, color="#1F3A5F", lw=1.2); ax.set_xlabel("t U / D"); ax.set_ylabel("Δt"); ax.set_ylim(0, 0.006)
@@ -184,8 +186,8 @@ s = D.slide("0", "What you will build, and what you need")
 D.bullets(s, [
     "**What you will build",
     (1, "a 2-D incompressible Navier–Stokes solver that produces the von Kármán vortex street behind a cylinder"),
-    (1, "on a body-fitted multiblock mesh (37,044 cells) with small cells on the walls and large cells far away"),
-    (1, "with checks: mass conservation to 1e-12, lift/drag history, Strouhal number ≈ 0.20"),
+    (1, "on a body-fitted multiblock mesh (26,444 cells) with small cells on the walls and large cells far away"),
+    (1, "with checks: mass conservation to 1e-12, lift/drag history, Strouhal number ≈ 0.21"),
     "**What you need",
     (1, "Python 3.10+, numpy, scipy, matplotlib  (pip install numpy scipy matplotlib);  ffmpeg only for the mp4"),
     (1, "the two files:  mesh_from_known_sizes.py  (mesh + staggered grid)   and   ns_staggered_euler.py  (solver)"),
@@ -228,18 +230,18 @@ D.text(s, "Each step slide is self-contained: the formula, the few lines of code
 D.section("PART A", "The physical problem", "What flows where, and which equations describe it")
 
 s = D.slide("A1", "The physical problem")
-D.pic(s, SK_DOMAIN, I(0.6), I(1.25), width=I(8.2))
+D.pic(s, SK_DOMAIN, I(0.6), I(1.2), height=I(3.0))
 D.bullets(s, [
-    "A long channel, 40 D long and 10 D high, with a cylinder of diameter D one quarter of the way in",
-    "Fluid enters from the left at speed U∞, leaves on the right, cannot slip on the top/bottom walls or the cylinder",
+    "A channel 24 D long and 12 D high, with a cylinder of diameter D centred at (6 D, 6 D) — 6 D from the inlet, mid-height",
+    "Fluid enters from the left (x = 0) at speed U∞, leaves on the right (x = 24), cannot slip on the top/bottom walls (y = 0, 12) or the cylinder",
     "Everything is non-dimensional: lengths in D, speeds in U∞, time in D/U∞ (\"convective time units\")",
     "The only parameter is Re = U∞D/ν = 150",
     "**What should happen (experiments & literature)",
     (1, "below Re ≈ 47 the wake is steady and symmetric; above it the wake oscillates — vortices peel off alternately from top and bottom"),
     (1, "at Re = 150: shedding frequency St = f D/U∞ ≈ 0.18, mean drag Cd ≈ 1.33, lift amplitude ≈ ±0.5"),
-    (1, "our channel is only 10 D high (10 % blockage) → expect St and Cd a little higher than these"),
-], I(0.6), I(4.0), I(12.1), I(3.0), size=13)
-D.callout(s, "Goal: reproduce the oscillating wake and measure St, Cd, Cl.", I(9.1), I(1.5), I(3.8), I(1.0), size=14, fill=LIGHT)
+    (1, "our channel is only 12 D high (8.3 % blockage) → expect St and Cd a little higher than these"),
+], I(0.6), I(4.3), I(12.1), I(2.7), size=13, space=3)
+D.callout(s, "Goal: reproduce the oscillating wake and measure St, Cd, Cl.", I(8.4), I(1.5), I(4.5), I(1.0), size=14, fill=LIGHT)
 
 s = D.slide("A2", "The governing equations, term by term")
 D.eq(s, r"\nabla\cdot\mathbf{u}=0", I(0.6), I(1.3), height=I(0.45))
@@ -265,7 +267,7 @@ D.section("PART B", "Building the mesh from three numbers", "mesh_from_known_siz
 s = D.slide("B1", "Why not a uniform grid?")
 D.bullets(s, [
     "The thin layer where the fluid slows to zero on the cylinder (the boundary layer) is about δ ≈ D/√Re ≈ 0.08 D thick",
-    "To resolve it we need cells of about 0.015 D there. A uniform 0.015 grid over 40 D × 10 D is 1.8 million cells — and Δt would be tiny everywhere",
+    "To resolve it we need cells of about 0.015 D there. A uniform 0.015 grid over 24 D × 12 D is 1.3 million cells — and Δt would be tiny everywhere",
     "Far from the cylinder the flow varies over ~1 D; cells of 0.1–0.2 D are plenty",
     "**So: small cells on the walls, growing geometrically outward, uniform large cells elsewhere. Three numbers describe this:",
     (1, "d_min — the wall-normal size of the first cell on every wall (cylinder and channel walls)"),
@@ -296,9 +298,9 @@ D.bullets(s, [
 ], I(8.3), I(1.3), I(4.6), I(3.4), size=12)
 D.table(s, [
     ["preset", "d_min", "d_max", "cells", "h_min", "Δt", "use"],
-    ["--quick", "0.05", "0.30", "6,630", "0.06", "0.02", "smoke test, steady wake, ~1 min"],
-    ["--fine", "0.015", "0.12", "37,044", "0.0177", "0.0045", "vortex shedding (this deck), ~6 min"],
-    ["INPUT (file default)", "0.006", "0.06", "132,870", "0.006", "0.001", "production; needs LU and patience"],
+    ["--quick", "0.05", "0.30", "4,848", "0.06", "0.02", "smoke test, steady wake, ~1 min"],
+    ["--fine", "0.015", "0.12", "26,444", "0.0177", "0.0045", "vortex shedding (this deck), ~5 min"],
+    ["INPUT (file default)", "0.006", "0.06", "~95,000", "0.006", "0.001", "production; needs LU and patience"],
 ], I(0.6), I(4.75), I(12.1), [I(2.0), I(1.1), I(1.1), I(1.3), I(1.1), I(1.1), I(4.4)], size=11)
 D.callout(s, "Rule of thumb: halve d_min → ×4 cells near walls and ÷4 in Δt (diffusive limit) → ×16 cost.", I(0.6), I(6.3), I(12.1), I(0.55), size=12, fill=LIGHT)
 
@@ -325,10 +327,10 @@ D.code(s, """[PASS] size jumps at block interfaces   ring->transition 1.992, tra
 [PASS] no inverted cells                min area 3.146e-04
 [PASS] conforming (no hanging nodes)    0 unclassified boundary edges
 STAGGERED GRID
-cells (P locations)     : 37,044
-faces (velocity locs)   : 74,603  (1,030 boundary, 73,573 interior)
+cells (P locations)     : 26,444
+faces (velocity locs)   : 53,286  (796 boundary, 52,490 interior)
 boundary patches        : ['cylinder', 'inlet', 'outlet', 'wall_bottom', 'wall_top']
-    cylinder  152 faces   inlet  104   outlet  104   wall_bottom  335   wall_top  335
+    cylinder  152 faces   inlet  120   outlet  120   wall_bottom  202   wall_top  202
 written to ./mesh_output/mesh_fine.(vtk|msh|png)
 written to ./mesh_output/staggered_fine.(npz|png)""", I(0.6), I(3.4), I(12.1), I(2.4), size=10)
 D.table(s, [
@@ -359,9 +361,9 @@ D.text(s, "Because of this, i±1 / j±1 never appear in the solver. 'The cell on
 s = D.slide("C2", "The arrays in staggered_fine.npz")
 D.table(s, [
     ["array", "shape", "meaning"],
-    ["cell_centers", "(Nc, 2)", "x_P — where p, u, v are stored  (Nc = 37,044)"],
+    ["cell_centers", "(Nc, 2)", "x_P — where p, u, v are stored  (Nc = 26,444)"],
     ["quads", "(Nc, 4, 2)", "the four corners of each cell (only for plotting)"],
-    ["face_centers", "(Nf, 2)", "x_f — where U_n is stored  (Nf = 74,603)"],
+    ["face_centers", "(Nf, 2)", "x_f — where U_n is stored  (Nf = 53,286)"],
     ["face_normals", "(Nf, 2)", "unit n_f, owner → neighbour, outward on the boundary"],
     ["face_lengths", "(Nf,)", "L_f, the 2-D 'area' of the face"],
     ["face_owner", "(Nf,)", "index of the owner cell"],
@@ -372,8 +374,8 @@ D.table(s, [
 ], I(0.6), I(1.3), I(7.6), [I(2.4), I(1.1), I(4.1)], size=11)
 D.code(s, """S = load_staggered("mesh_output/staggered_fine.npz")
 own, nei = S["face_owner"], S["face_neigh"]
-interior = nei >= 0                       # 73,573 True
-bnd      = ~interior                      #  1,030 True
+interior = nei >= 0                       # 52,490 True
+bnd      = ~interior                      #    796 True
 masks = {name: S["face_bc"] == i
          for i, name in enumerate(S["bc_names"])}
 # masks["inlet"], masks["cylinder"], ... boolean (Nf,)""", I(8.5), I(1.4), I(4.5), I(2.4), size=10)
@@ -407,7 +409,7 @@ hmin = np.sqrt(vol).min()                  # 0.01774 on the fine mesh""", I(0.6)
 D.bullets(s, [
     "s_{P,f} = +1 when P owns f (n points out of P), −1 when P is the neighbour (n points into P)",
     "np.add.at adds into repeated indices correctly (plain out[own] += flux would not)",
-    "The area formula is the divergence theorem applied to the vector field x (∇·x = 2) — a first check that the data structure is right: the areas must be positive and sum to the domain area 400 − π/4",
+    "The area formula is the divergence theorem applied to the vector field x (∇·x = 2) — a first check that the data structure is right: the areas must be positive and sum to the domain area 24·12 − π/4 = 287.21",
     "Convection, diffusion, divergence and gradient (Part D) are all accumulate() with a different flux",
 ], I(0.6), I(5.0), I(8.0), I(2.0), size=12)
 D.callout(s, "Gauss' theorem, the only piece of calculus we need:\n\n∫_V ∇·F dV = ∮ F·n dS ≈ Σ_f s_{P,f} (F·n)_f L_f\n\n'the net amount leaving a cell is the sum of what crosses its faces'", I(8.9), I(2.1), I(4.1), I(2.6), size=12, fill=LIGHT)
@@ -436,7 +438,7 @@ s = D.slide("D2", "Time derivative: forward (explicit) Euler")
 D.eq(s, r"\frac{\partial\phi}{\partial t}\approx\frac{\phi_P^{\,n+1}-\phi_P^{\,n}}{\Delta t}\quad\Longrightarrow\quad\phi_P^{\,n+1}=\phi_P^{\,n}+\Delta t\cdot\mathrm{RHS}_P(\phi^{\,n})", I(0.6), I(1.35), height=I(0.8))
 D.bullets(s, [
     "'Explicit' = the right-hand side is evaluated with the field we already have (level n). The new value is a formula, not an equation to solve",
-    "The same line of code updates all 37,044 cells at once: u_new = u + dt * rhs",
+    "The same line of code updates all 26,444 cells at once: u_new = u + dt * rhs",
     "Accuracy: first order — the error per unit time is proportional to Δt. With Δt = 0.0045 that is small compared with the spatial error of the mesh",
     "**Stability (Part F): an explicit step is only stable if Δt is small enough that fluid moves less than one cell per step and viscosity acts over less than one cell per step. The smallest cell decides.",
     "This is exactly the scheme of the Griebel book / the CaptainProton42 code; the 'projection' trick of Part E makes it work with the incompressibility constraint",
@@ -506,7 +508,7 @@ D.bullets(s, [
     "This is a discrete Poisson equation ∇²p = (1/Δt) ∇·u* — the same one Griebel write, but obtained directly on our faces",
     "Read it as: 'find the pressure whose push through the faces removes exactly the divergence that the predictor created'",
     "Because F, G contained no pressure at all, the solution p is the pressure itself at the new time, not a correction to an old pressure",
-    "Nc = 37,044 equations in 37,044 unknowns, each coupling a cell to its 4 neighbours → a sparse linear system A p = rhs",
+    "Nc = 26,444 equations in 26,444 unknowns, each coupling a cell to its 4 neighbours → a sparse linear system A p = rhs",
 ], I(0.6), I(5.2), I(12.1), I(1.9), size=13)
 
 s = D.slide("E2", "Assembling the matrix A")
@@ -525,7 +527,7 @@ D.bullets(s, [
     "Check: A @ np.ones(Nc) is zero to round-off; A − A.T is exactly zero",
 ], I(0.6), I(3.5), I(8.0), I(3.4), size=13)
 D.callout(s, "Analogy: A is the conductance matrix of a resistor network — one resistor L/d per face, p the node voltages, rhs the injected currents. Kirchhoff says the injected currents must sum to zero.", I(8.9), I(1.4), I(4.1), I(2.2), size=12, fill=LIGHT)
-D.table(s, [["Nc", "nnz(A)", "memory"], ["37,044", "184,190", "2.2 MB"]], I(8.9), I(3.9), I(4.1), [I(1.3), I(1.4), I(1.4)], size=11)
+D.table(s, [["Nc", "nnz(A)", "memory"], ["26,444", "131,424", "1.7 MB"]], I(8.9), I(3.9), I(4.1), [I(1.3), I(1.4), I(1.4)], size=11)
 
 s = D.slide("E3", "Solving A p = rhs — three ways, one default")
 D.code(s, """rhs = (1.0 / dt) * vol * _div(Un_star)
@@ -538,9 +540,9 @@ else:                                   # "sor"
     for it in range(max_it): Gauss-Seidel sweep with omega = 1.7 until the residual < eps
 p -= p.mean()                           # pin the free constant""", I(0.6), I(1.3), I(8.0), I(2.4), size=10)
 D.table(s, [
-    ["--poisson", "idea", "work per time step (37k cells)", "when to use"],
+    ["--poisson", "idea", "work per time step (26k cells)", "when to use"],
     ["sor", "sweep cell by cell, over-relax (ω = 1.7). Griebel's original", "thousands of sweeps, seconds", "to see the textbook method"],
-    ["cg", "conjugate gradient, Jacobi preconditioner, on the mean-free operator", "≈ 1000 iterations, 390 ms", "very large meshes (no factorisation memory)"],
+    ["cg", "conjugate gradient, Jacobi preconditioner, on the mean-free operator", "≈ 1000 iterations, ~300 ms", "very large meshes (no factorisation memory)"],
     ["lu (default)", "pin one cell, factorise A once (SuperLU), two triangular solves per step", "2 ms", "whenever the mesh fits in memory"],
 ], I(0.6), I(3.9), I(12.1), [I(1.3), I(5.0), I(2.9), I(2.9)], size=11)
 D.bullets(s, [
@@ -556,8 +558,8 @@ D.section("PART F", "BCs, time step, initial condition", "the parts that decide 
 s = D.slide("F1", "Boundary conditions — where each one is applied")
 D.table(s, [
     ["patch", "velocity", "how it enters the code", "pressure"],
-    ["inlet (x = −10)", "u = U∞, v = v_in(t)", "U_n set directly on inlet faces; u_bc in the Laplacian; φ_f at the face", "∂p/∂n = 0 (no face in A)"],
-    ["outlet (x = +30)", "∂u/∂n = 0, ∂v/∂n = 0", "U_n* taken from the owner cell; then shifted so outflow = inflow", "∂p/∂n = 0"],
+    ["inlet (x = 0)", "u = U∞, v = v_in(t)", "U_n set directly on inlet faces; u_bc in the Laplacian; φ_f at the face", "∂p/∂n = 0 (no face in A)"],
+    ["outlet (x = 24)", "∂u/∂n = 0, ∂v/∂n = 0", "U_n* taken from the owner cell; then shifted so outflow = inflow", "∂p/∂n = 0"],
     ["wall_top, wall_bottom", "u = v = 0", "U_n = 0; φ_bc = 0 in the Laplacian; φ_f = 0 in convection", "∂p/∂n = 0"],
     ["cylinder", "u = v = 0", "same as walls", "∂p/∂n = 0"],
 ], I(0.6), I(1.3), I(12.1), [I(2.0), I(2.2), I(5.4), I(2.5)], size=11)
@@ -582,8 +584,8 @@ D.bullets(s, [
     "**Re h_min² / 4 = h_min²/(4ν) — the diffusive limit of explicit Euler in 2-D: viscosity may not 'reach' further than one cell per step",
     "**τ — safety factor for what the two simple limits ignore (their interaction, the nonlinear term, skewed cells). Griebel use 0.5; 0.4 here",
     "Both limits are set by the smallest cell, which sits on the cylinder. The far field has 0.12 cells and 'wastes' most of each step — the price of a single global explicit Δt",
-    "|u|_max ≈ 1.0 at the start, 1.58 during shedding → Δt stays between 0.0045 and 0.0047: adaptive in name, practically constant",
-    "Fine mesh: 26,600 steps to t = 120, ≈ 1,100 steps per shedding period. --dt fixes it by hand, --tau changes the margin",
+    "|u|_max ≈ 1.4 after the start, 1.5–1.6 during shedding → Δt stays between 0.0044 and 0.0047: adaptive in name, practically constant",
+    "Fine mesh: 25,700 steps to t = 120, ≈ 1,000 steps per shedding period. --dt fixes it by hand, --tau changes the margin",
 ], I(0.6), I(2.3), I(7.2), I(4.6), size=12)
 D.pic(s, DTH, I(8.0), I(2.3), width=I(5.0))
 D.code(s, """def stable_dt():
@@ -593,18 +595,18 @@ D.code(s, """def stable_dt():
 s = D.slide("F3", "Initial condition, and why a symmetric start never sheds")
 D.bullets(s, [
     "Start from u = U∞, v = 0 everywhere (impulsive start) and project once (Parts E/G) so the first step begins divergence-free",
-    "**Problem we hit: the mesh is exactly mirror-symmetric about y = 0, and so is every operator. A symmetric start therefore stays symmetric forever in exact arithmetic — Cl printed as −0.000 for 120 time units while the wake grew into the long, steady (and unstable) symmetric bubble",
+    "**Problem we hit: the mesh is exactly mirror-symmetric about the cylinder centre-line y = y_c, and so is every operator. A symmetric start therefore stays symmetric forever in exact arithmetic — Cl printed as −0.000 for 120 time units while the wake grew into the long, steady (and unstable) symmetric bubble",
     "Round-off eventually breaks the symmetry, but it has to grow by 10¹³ — on our mesh the oscillation only started at tU/D ≈ 120 (left plot)",
-    "**Fix: add a small, localised, non-symmetric kick that the physics will amplify if shedding is real — a transverse velocity bump one diameter behind the cylinder, plus a 2-time-unit inlet pulse",
-    "With it, shedding is established by tU/D ≈ 20–30 (right plot). The seed is washed out within a few time units; both runs end on the same limit cycle (Cl = ±0.75). That is the test that the seed only triggered, and did not create, the oscillation",
+    "**Fix: add a small, localised, non-symmetric kick that the physics will amplify if shedding is real — a transverse velocity bump one diameter behind the cylinder (at x_c + D, y_c), plus a 2-time-unit inlet pulse",
+    "With it, shedding is established by tU/D ≈ 20–30 (right plot). The seed is washed out within a few time units; both runs end on the same limit cycle (Cl = ±0.75 on that domain). That is the test that the seed only triggered, and did not create, the oscillation",
 ], I(0.6), I(1.3), I(12.1), I(2.7), size=12)
-D.code(s, """r2 = (P[:, 0] - 1.0)**2 + P[:, 1]**2
+D.code(s, """r2 = (P[:, 0] - (xc + D))**2 + (P[:, 1] - yc)**2
 v += perturb * U_inf * np.exp(-r2 / 0.5**2)     # perturb = 0.1   (CLI: --perturb, 0 = off)
 v_in(t) = perturb * U_inf * sin(pi * t / 2)  for t < 2""", I(0.6), I(3.7), I(8.4), I(0.85), size=10)
-D.pic(s, ART / "forces_central_fine.png", I(0.6), I(4.95), height=I(2.05))
-D.pic(s, ART / "forces_central_fine_default_run.png", I(6.9), I(4.95), height=I(2.05))
-D.text(s, "no seed (--perturb 0): onset at t ≈ 120", I(0.6), I(4.65), I(6), I(0.3), size=11, bold=True)
-D.text(s, "seed 0.1 (default): onset at t ≈ 20, same final amplitude", I(6.9), I(4.65), I(6), I(0.3), size=11, bold=True)
+D.pic(s, ART / "forces_noseed_40x10.png", I(0.6), I(4.95), height=I(2.05))
+D.pic(s, ART / "forces_seed_40x10.png", I(6.9), I(4.95), height=I(2.05))
+D.text(s, "no seed (--perturb 0): onset at t ≈ 120   [earlier 40 D × 10 D domain]", I(0.6), I(4.65), I(6), I(0.3), size=11, bold=True)
+D.text(s, "seed 0.1: onset at t ≈ 20, same final amplitude   [same domain]", I(6.9), I(4.65), I(6), I(0.3), size=11, bold=True)
 
 # ======================================================== PART G  the step
 D.section("PART G", "One complete time step", "and the loop around it")
@@ -668,7 +670,7 @@ D.bullets(s, [
     "Cl oscillating in time is the signature of shedding; its frequency gives St; Cd oscillates at twice that frequency",
     "**Restart: fields_*.npz holds u, v, p, U_n, t and the history; --restart continues from it on the same mesh (we ran 0→150, then 150→240)",
 ], I(0.6), I(5.2), I(7.6), I(1.9), size=12)
-D.callout(s, "Numbers on the fine mesh (LU, central):\n• 12 ms per step\n• 26,644 steps to t = 120 → 5.6 min\n• frames ≈ 0.5 s each (266 at --frame-every 100)\n• run to t = 240 with --restart: +5 min", I(8.5), I(1.4), I(4.5), I(2.4), size=12, fill=LIGHT)
+D.callout(s, "Numbers on the fine mesh (LU, central):\n• 12 ms per step\n• 25,725 steps to t = 120 → 5.6 min\n• frames ≈ 0.5 s each (266 at --frame-every 100)\n• run to t = 240 with --restart: +5 min", I(8.5), I(1.4), I(4.5), I(2.4), size=12, fill=LIGHT)
 
 # ======================================================== PART H  running
 D.section("PART H", "Running it", "commands, what the console shows, which files appear")
@@ -720,35 +722,35 @@ D.table(s, [
 s = D.slide("H2", "What the console shows, and how to read it")
 D.code(s, """GRIEBEL NS on known-sizes staggered mesh
 mesh     : mesh_output/staggered_fine.npz
-cells    : 37,044   faces: 74,603   hmin=0.01774
+cells    : 26,444   faces: 53,286   hmin=0.01774
 sizing   : d_min=0.015  d_max=0.12  a=2.204
 scheme   : central   Re=150  nu=0.00666667  poisson=lu
 steps    : <=200000  t_end=120
 ------------------------------------------------------------------------
-step     1  t=0.0035  dt=0.003533  g=0.000  max|div|=3.959e-10  max|u|=1.954  Cd=453.7  Cl=-8.78
-step  1980  t=9.1894  dt=0.004719  g=0.000  max|div|=1.2e-12    max|u|=1.316  Cd=1.285  Cl=+0.193
-step  9980  t=44.964  dt=0.004511  g=0.000  max|div|=1.8e-12    max|u|=1.573  Cd=1.679  Cl=-0.614
-step 26644  t=120.00  dt=0.004504  g=0.000  max|div|=1.9e-12    max|u|=1.574  Cd=1.642  Cl=+0.651
+step     1  t=0.0047  dt=0.004719  g=0.000  max|div|=5.3e-12    max|u|=1.87   Cd=320.1  Cl=-6.3
+step  1500  t=6.9399  dt=0.004719  g=0.000  max|div|=4.6e-12    max|u|=1.396  Cd=1.262  Cl=-0.100
+step  5840  t=27.199  dt=0.004438  g=0.000  max|div|=7.9e-12    max|u|=1.600  Cd=1.556  Cl=+0.594
+step 25725  t=120.00  dt=0.004673  g=0.000  max|div|=7.8e-12    max|u|=1.519  Cd=1.533  Cl=+0.066
 ------------------------------------------------------------------------
-done in 335.6s  (12.6 ms/step)  t=120.003
-forces   : Cd_mean=1.643  Cl_amp=0.751  St=0.213 (ref ~0.18)
-wrote output_ns/cylinder_wake_central.gif  (45 of 266 frames, 6.7 MB)""", I(0.6), I(1.3), I(12.1), I(3.6), size=10)
+done in 335.1s  (13.0 ms/step)  t=120.005
+forces   : Cd_mean=1.564  Cl_amp=0.712  St=0.207 (ref ~0.18)
+wrote output_ns/cylinder_wake_central.gif  (44 of 44 frames, 5.6 MB)""", I(0.6), I(1.3), I(12.1), I(3.6), size=10)
 D.table(s, [
     ["column", "what it tells you", "healthy value"],
     ["dt", "the adaptive step (F2)", "0.0045–0.0047 after the start"],
     ["g (γ)", "upwind blend: 0 for central, 1 for upwind, CFL for donor", "as chosen"],
-    ["max|div|", "largest cell divergence after the projection — THE correctness check", "1e-12 (lu); 1e-8 (cg)"],
-    ["max|u|", "fastest fluid anywhere", "≈ 1.3 steady wake, ≈ 1.6 while shedding; growing without bound = instability"],
+    ["max|div|", "largest cell divergence after the projection — THE correctness check", "~1e-11 (lu); 1e-8 (cg)"],
+    ["max|u|", "fastest fluid anywhere", "≈ 1.4 steady wake, ≈ 1.5–1.6 while shedding; growing without bound = instability"],
     ["Cd, Cl", "drag and lift coefficients", "huge for a few steps (impulsive start), then Cd ≈ 1.6, Cl oscillating"],
 ], I(0.6), I(5.0), I(12.1), [I(1.5), I(6.0), I(4.6)], size=10)
 
 s = D.slide("H3", "Files produced")
 D.table(s, [
     ["file (output_ns/)", "content", "look at it to…"],
-    ["wake_{step}_t{time}.png", "two-panel snapshot: vorticity and u − U∞ with arrows", "see the flow at one instant"],
+    ["wake_{step}_t{time}.png", "two panels: 'Vorticity plot' (ω_z) and 'Velocity plot' (|u| with arrows)", "see the flow at one instant"],
     ["cylinder_wake_central.gif", "the last ~4 shedding periods, looped (≤ 60 frames)", "see the shedding"],
     ["forces_central_fine.png", "Cd(t), Cl(t), late-time Cd mean, Cl amplitude, St", "measure the result"],
-    ["plot_central_fine.png", "final u − U∞ field and max|div|(t) on a log scale", "confirm mass conservation held all run"],
+    ["plot_central_fine.png", "final Velocity plot and max|div|(t) on a log scale", "confirm mass conservation held all run"],
     ["fields_central_fine.npz", "u, v, p, Un, t, hist_t, hist_Cd, hist_Cl, hist_div, hist_umax", "post-process yourself / --restart"],
     ["demo/cylinder_wake_griebel.gif (--demo)", "copy of the GIF for the README", "share"],
 ], I(0.6), I(1.3), I(12.1), [I(3.4), I(5.4), I(3.3)], size=11)
@@ -767,7 +769,7 @@ s = D.slide("I1", "Level 1 — internal consistency checks (do these first)")
 D.table(s, [
     ["check", "how", "expected", "if not"],
     ["mesh is valid", "mesher [PASS] lines", "no inverted cells, 0 unclassified edges", "increase a / max_jump, reduce d_max"],
-    ["cell areas", "vol.sum() vs 400 − π/4", "equal to 1e-10", "owner/neighbour or normal orientation wrong"],
+    ["cell areas", "vol.sum() vs 24·12 − π/4 = 287.21", "equal to 1e-10", "owner/neighbour or normal orientation wrong"],
     ["A is symmetric & singular", "abs(A − A.T).max(), A @ ones", "0, 0", "assembly sign error"],
     ["uniform flow is preserved", "run with no cylinder forces: u stays U∞", "exactly", "BC or flux error"],
     ["mass conservation", "max|div| column", "1e-12 (lu)", "outlet not balanced / solver tolerance"],
@@ -780,20 +782,20 @@ D.bullets(s, [
 ], I(0.6), I(4.6), I(12.1), I(1.5), size=13)
 
 s = D.slide("I2", "Level 2 & 3 — is it converged, is it physical?")
-D.pic(s, ART / "forces_central_fine_default_run.png", I(0.6), I(1.3), height=I(3.4))
+D.pic(s, ART / "forces_griebel_fine.png", I(0.6), I(1.3), height=I(3.4))
 D.table(s, [
     ["quantity", "this run (fine, central)", "literature, unbounded cylinder", "why different"],
-    ["St", "0.20–0.21", "0.18 (Williamson 1996)", "10 % blockage raises St; 1st-order time"],
-    ["Cd mean", "1.64", "1.33", "blockage (+10–15 %), coarse far field"],
-    ["Cl amplitude", "0.75", "≈ 0.5", "blockage; central scheme on 0.12 cells"],
+    ["St", "0.207", "0.18 (Williamson 1996)", "8.3 % blockage raises St; 1st-order time"],
+    ["Cd mean", "1.56", "1.33", "blockage (+10–15 %), coarse far field"],
+    ["Cl amplitude", "0.71", "≈ 0.5", "blockage; central scheme on 0.12 cells"],
     ["Cd oscillation", "2 × lift frequency", "2 × lift frequency", "✓ one vortex from each side per cycle"],
     ["onset", "Hopf-type exponential growth → limit cycle", "same", "✓"],
 ], I(6.3), I(1.4), I(6.7), [I(1.5), I(1.6), I(1.9), I(1.7)], size=10)
 D.bullets(s, [
     "**Converged in time? Cl amplitude and period constant for the last ~15 cycles → yes (a limit cycle)",
     "**Converged in space? Not tested here. The honest test is to rerun with d_min = 0.010 and d_max = 0.08 and see St, Cd move by less than a few %. Expect the far-field d_max to matter most for Cd",
-    "**Physical? The qualitative picture (alternating street, St ≈ 0.2, Cd ≈ 1.3–1.6, Cd at 2f) is right; the quantitative gaps are explained by the 10 D channel height and first-order Euler — both deliberate simplifications of the setup, not bugs",
-    "To compare with the literature properly: widen the channel to ±15 D (blockage 3 %) and refine the far field",
+    "**Physical? The qualitative picture (alternating street, St ≈ 0.2, Cd ≈ 1.3–1.6, Cd at 2f) is right; the quantitative gaps are explained by the 12 D channel height and first-order Euler — both deliberate simplifications of the setup, not bugs",
+    "To compare with the literature properly: widen the channel to 30 D (blockage 3 %) and refine the far field",
 ], I(6.3), I(4.35), I(6.7), I(2.7), size=11, space=3)
 
 # ======================================================== PART J  pictures
@@ -802,8 +804,8 @@ D.section("PART J", "Making and reading the pictures", "what a frame is, and wha
 s = D.slide("J1", "How a frame is made — and what it is not")
 D.code(s, """def save_wake_frame(path, solver):
     fig, (ax0, ax1) = plt.subplots(2, 1, figsize=(9.5, 7.6), sharex=True)
-    _draw_field(ax0, solver, solver.vorticity(), vlim=3.0, quiver=False)   # top
-    _draw_field(ax1, solver, solver.u - solver.U_inf, vlim=0.8)           # bottom
+    _draw_vorticity(ax0, solver);  ax0.set_title("Vorticity plot")          # top
+    _draw_velocity(ax1, solver, vmax=1.6);  ax1.set_title("Velocity plot")  # bottom: |u|
     ...
 def _draw_field(ax, solver, field, vlim, quiver=True):
     coll = PolyCollection(S["quads"], array=field, cmap="RdBu_r")  # one colour per CELL
@@ -813,7 +815,7 @@ def _draw_field(ax, solver, field, vlim, quiver=True):
         ax.quiver(P[idx, 0], P[idx, 1],
                   solver.u[idx], solver.v[idx])           # the velocity VECTOR there""", I(0.6), I(1.3), I(7.2), I(3.0), size=10)
 D.bullets(s, [
-    "Colour: every mesh cell is filled with its own value at this instant — vorticity ω_z = ∂v/∂x − ∂u/∂y (top; red/blue = the two senses of rotation) and u − U∞ (bottom; free stream white, wake blue, shoulders red)",
+    "Colour: every mesh cell is filled with its own value at this instant — 'Vorticity plot': ω_z = ∂v/∂x − ∂u/∂y (red/blue = the two senses of rotation); 'Velocity plot': the speed |u| = √(u²+v²) (free stream ≈ 1, wake dark, shoulders bright). Titles and colour-bar labels carry only the plot type",
     "Arrows: the velocity vector (u_P, v_P) of ~400 sampled cells at this instant — direction and magnitude of the flow there",
     "Time: one frame every 40 steps by default (≈ 0.18 time units, ~27 frames per shedding period; the long runs here used --frame-every 100); the GIF loops the last ~4 periods (--gif-from), the MP4 is the whole history",
     "**What it is NOT: there are no streamlines or particle paths (plt.streamplot is never called). Nothing is tracked from one frame to the next — the next frame is simply the next saved state, coloured and arrowed again",
@@ -824,7 +826,7 @@ s = D.slide("J2", "Reading the near wake on the actual mesh")
 D.pic(s, ZOOM, I(0.6), I(1.3), width=I(12.1))
 D.bullets(s, [
     "Cell values drawn with their edges: the solution is smooth across the O-ring → square → Cartesian block interfaces — no checkerboard, no jumps at the size steps",
-    "Left: the recirculating wake (u − U∞ ≈ −1 means fluid moving backwards) is pulled to one side — this frame is at a lift maximum",
+    "Left: the recirculating wake (|u| ≈ 0, dark) is pulled to one side — this frame is at a lift maximum",
     "Right: the two shear layers (opposite-sign vorticity) roll up alternately into the street; each vortex is about one diameter across and resolved by ~10 cells",
 ], I(0.6), I(6.0), I(12.1), I(1.1), size=11)
 
@@ -856,8 +858,8 @@ D.table(s, [
     ["bigger step", "--fine --tau 0.9", "max|u| grows, NaN", "the CFL / diffusive limits"],
     ["coarser mesh", "--quick --scheme central --t-end 120", "weak or no shedding", "resolution of the shear layers"],
     ["solver cost", "--fine --poisson cg --steps 100  vs  --poisson lu", "ms/step", "where the time goes"],
-    ["blockage", "edit MESH_PRESETS: y_min=-15, y_max=15", "St and Cd move toward 0.18 / 1.33", "wall confinement"],
-    ["frame content", "edit _wake_field to return p", "pressure minima at the vortex cores", "what the fields mean"],
+    ["blockage", "edit INPUT: y_max=30, yc=15 (30 D high)", "St and Cd move toward 0.18 / 1.33", "wall confinement"],
+    ["frame content", "edit _draw_velocity to colour by p", "pressure minima at the vortex cores", "what the fields mean"],
 ], I(0.6), I(1.3), I(12.1), [I(1.5), I(4.2), I(3.7), I(2.7)], size=11)
 D.bullets(s, [
     "**Natural next steps for the code: treat diffusion implicitly (removes the h² limit on Δt), second-order time stepping (Adams–Bashforth / RK), non-orthogonal correction in _laplacian, a proper outflow (convective) condition, mesh-refinement study",

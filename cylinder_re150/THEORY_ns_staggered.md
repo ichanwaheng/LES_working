@@ -62,8 +62,8 @@ projection method exploits.
 
 | patch | velocity | pressure |
 |---|---|---|
-| `inlet` (x = −10) | \(u = U_\infty,\ v = v_{in}(t)\) (Dirichlet) | \(\partial p/\partial n = 0\) |
-| `outlet` (x = +30) | \(\partial \mathbf{u}/\partial n = 0\), flux balanced | \(\partial p/\partial n = 0\) |
+| `inlet` (x = 0) | \(u = U_\infty,\ v = v_{in}(t)\) (Dirichlet) | \(\partial p/\partial n = 0\) |
+| `outlet` (x = 24 D) | \(\partial \mathbf{u}/\partial n = 0\), flux balanced | \(\partial p/\partial n = 0\) |
 | `wall_top`, `wall_bottom`, `cylinder` | \(\mathbf{u} = 0\) (no-slip) | \(\partial p/\partial n = 0\) |
 
 \(v_{in}(t) = \varepsilon U_\infty \sin(\pi t/T)\) for \(t<T=2\) is a small
@@ -369,10 +369,10 @@ is tracked between them.
   given by the cell-centred value at that instant. Top panel:
   \(\omega_z=\partial_x v-\partial_y u\), computed with the Green–Gauss
   gradient (8) applied to \(u\) and \(v\) (`vorticity`); red/blue are the
-  counter-rotating vortices of the von Kármán street. Bottom panel:
-  \(u-U_\infty\), the streamwise velocity deficit, so that the wake (blue, slower
-  than free stream) and the accelerated flow past the shoulders (red) are visible
-  while the uniform free stream is white.
+  counter-rotating vortices of the von Kármán street ("Vorticity plot").
+  Bottom panel: the speed \(|\mathbf{u}|=\sqrt{u^2+v^2}\) ("Velocity plot"),
+  so the wake (slow, dark) and the accelerated flow past the shoulders (fast,
+  bright) stand out from the uniform free stream \(|\mathbf{u}|=U_\infty\).
 * **Arrows.** On a subset of cells (every ~90th, ≈400 arrows) the vector
   \((u_P, v_P)\) at that instant is drawn with `quiver`; direction shows the
   flow direction, length is proportional to speed. They are *not* streamlines
@@ -395,6 +395,6 @@ number \(St=fD/U_\infty\) is estimated from the upward zero crossings of
 
 ### Solution plot (`plot_*.png`)
 
-Left: the \(u-U_\infty\) field at the final time. Right: the continuity
+Left: the speed \(|\mathbf{u}|\) at the final time ("Velocity plot"). Right: the continuity
 residual \(\max_P|\nabla\cdot\mathbf{u}|\) versus time on a log scale — a check
 that the projection is doing its job (≈1e-12 with the direct solver).

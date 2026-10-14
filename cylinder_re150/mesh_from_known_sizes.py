@@ -45,13 +45,13 @@ from matplotlib.collections import PolyCollection
 # =====================================================================
 INPUT = dict(
     # 1. fluid domain and cylinder position
-    x_min=-10.0,
-    x_max=30.0,
-    y_min=-5.0,
-    y_max=5.0,
-    xc=0.0,
-    yc=0.0,
-    D=1.0,  # cylinder centre and diameter
+    x_min=0.0,
+    x_max=24.0,  # 24 D long
+    y_min=0.0,
+    y_max=12.0,  # 12 D high
+    xc=6.0,
+    yc=6.0,
+    D=1.0,  # cylinder centre (6 D, 6 D) and diameter
     walls=("top", "bottom"),  # which domain sides are walls
     # 2. smallest cell (wall-normal size of the first cell at every wall)
     d_min=0.006,
