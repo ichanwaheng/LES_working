@@ -888,8 +888,8 @@ s = D.slide("", "File map")
 D.table(s, [
     ["file", "role"],
     ["cylinder_re150/mesh_from_known_sizes.py", "mesher: INPUT → O–H multiblock quads → verify → extract_staggered → mesh_output/staggered_*.npz"],
-    ["cylinder_re150/ns_staggered_euler.py", "solver: load_staggered, build_topology, GriebelStaggeredNS (step, _project_Un, …), plotting, CLI"],
-    ["cylinder_re150/viz.py", "save_wake_gif (frames → palette GIF)"],
+    ["cylinder_re150/ns_staggered_euler.py", "solver: load_staggered, build_topology, GriebelStaggeredNS (step, _project_Un, …), plotting, save_wake_gif, CLI"],
+    ["cylinder_re150/tools/compare_nasa.py", "post-processing: Cd, Cl, St against the NASA Study #1 reference (VALIDATION_NASA.md)"],
     ["cylinder_re150/THEORY_12_steps.md", "the method as twelve short steps (this deck in text form)"],
     ["cylinder_re150/THEORY_ns_staggered.md", "compact term-by-term derivation"],
     ["cylinder_re150/demo/", "cylinder_wake_griebel.gif, forces_griebel_fine.png, ns_fine_shedding_frame.png, these slides"],
