@@ -1,97 +1,110 @@
 # Laminar cylinder at Re = 150 (NASA Study #1)
 
-Self-contained **2-D incompressible PISO** solver for laminar flow past a circular cylinder at
+Self-contained 2-D incompressible Navier–Stokes solver for laminar flow past a
+circular cylinder at
 
 \[
-\mathrm{Re}_D = U_\infty D / \nu = 150.
+\mathrm{Re}_D = U_\infty D / \nu = 150,
 \]
 
-This case mirrors the NASA GRC Wind-US validation page:
+on the O–H multiblock **staggered** mesh produced by `mesh_from_known_sizes.py`.
+The time-stepping / projection method follows Griebel, Dornseifer & Neunhoeffer
+(1998) as implemented in <https://github.com/CaptainProton42/NavierStokes>;
+the operators are finite-volume on the unstructured quad faces of that mesh.
 
-- https://www.grc.nasa.gov/www/wind/valid/lamcyl/Study1_files/Study1.html
+Reference case: NASA GRC Wind-US validation page
+<https://www.grc.nasa.gov/www/wind/valid/lamcyl/Study1_files/Study1.html>
+(experimental \(C_D \approx 1.78\), \(S_t = 0.179\)–\(0.182\)). The comparison
+with our results is in `VALIDATION_NASA.md`.
 
-Independent of `cylinder_re3900` (3-D LES) and of the membrane FSI code at the repo root.
+## Setup
 
-## Physics
+Domain 24 D × 12 D, cylinder of diameter D = 1 at (6 D, 6 D); uniform inlet at
+x = 0, mass-balanced outlet at x = 24 D, no-slip top and bottom walls.
 
-At Re = 150 the wake is essentially **two-dimensional** with periodic vortex shedding. Validation quantities:
+Mesh (fine preset): boundary-layer stack from `d_min = 0.015` growing by 1.15
+up to `d_max = 0.12`, O-block ring + transition to a square around the cylinder,
+Cartesian blocks elsewhere, ≈ 26 k cells. Cell size jumps at block interfaces
+are kept ≤ 2.
 
-| Quantity | Symbol | Experimental target | Source |
-|----------|--------|---------------------|--------|
-| Mean drag | \(C_D\) | ≈ 1.78 | Schlichting (cited by NASA) |
-| Strouhal | \(S_t = f D / U\) | 0.179 – 0.182 | Roshko NACA 1191 |
-
-NASA Wind-US runs A–D reported \(C_D \approx 1.68\)–\(1.80\) and \(S_t \approx 0.15\)–\(0.18\) depending on time-marching options.
+Time step: \(\Delta t = \tau \min(h_{min}/|u|_{max},\; \mathrm{Re}\, h_{min}^2/4)\)
+with \(\tau = 0.4\) (≈ 0.0045 on the fine mesh).
 
 ## How to run
 
 ```bash
 cd cylinder_re150
 
-# Inspect mesh + cylinder geometry BEFORE analysis
-python3 plot_mesh.py --quick
-python3 run.py --mesh-only --quick
+# fine mesh, central convection, run to tU/D = 120, write frames + GIF + plots
+python3 ns_staggered_euler.py --fine --scheme central --build-mesh --demo
 
-# Full solve (also writes mesh_geometry.png first)
-python3 run.py --quick
-python3 run.py
-python3 run.py --t-end 120 --gif-fps 8
-python3 run.py --no-gif
+# coarse smoke test (visible wake, no shedding)
+python3 ns_staggered_euler.py --quick --scheme donor --steps 80 --demo
 
-# Build / rebuild GIF from existing wake_t*.png frames
-python3 make_gif.py
-python3 make_gif.py --out-dir output --fps 8 --every 2 --demo
-python3 make_gif.py --run-quick --demo
+# continue a finished run (same mesh)
+python3 ns_staggered_euler.py --fine --scheme central --t-end 240 \
+        --restart output_ns/fields_central_fine.npz
+
+# mesh only (prints the sizing report and all PASS/FAIL checks)
+python3 mesh_from_known_sizes.py
+
+# compare Cd, Cl, St of the stored runs against NASA
+python3 tools/compare_nasa.py
 ```
 
-Config: `config.yaml` (`physical`, `domain`, `mesh`, `time`, `solver`, `validation`, `quick`).
+Important flags of `ns_staggered_euler.py`:
 
-### Mesh inputs (not `nx`, `ny`)
-
-| Input | Meaning | Typical |
-|-------|---------|---------|
-| `mesh.n_bl` | cells inside the BL | 15–30 |
-| `mesh.growth` | geometric growth rate | 1.05–1.2 |
-| `mesh.h_far` | optional outer size (default = `Δ_max`) | — |
-
-Sizing rule: ``δ = D/√Re`` → geometric series of `n_bl` cells → outer fluid uses `Δ_max`.
-Cell counts `nx`, `ny` are **computed**. See `mesh_sizing.py` and `python3 plot_mesh.py`.
+| Flag | Meaning |
+|------|---------|
+| `--quick` / `--fine` | mesh preset (smoke / shedding-resolving) |
+| `--build-mesh` | rebuild the mesh instead of reusing `mesh_output/staggered_*.npz` |
+| `--scheme central|upwind|donor` | γ = 0 / γ = 1 / γ = max CFL face blend for convection |
+| `--poisson lu|cg|sor` | pressure solver (SuperLU direct is the default) |
+| `--t-end`, `--steps`, `--tau`, `--dt` | run length and time-step control |
+| `--perturb` | amplitude of the near-wake seed that triggers shedding (0 = off) |
+| `--frame-every`, `--gif-fps`, `--gif-from`, `--no-gif` | frame and GIF output |
+| `--restart` | continue from a `fields_*.npz` |
+| `--demo` | copy GIF / force plot / final frame into `demo/` |
 
 ## Outputs
 
-| File | Content |
+| Path | Content |
 |------|---------|
-| `output/force_history.csv` / `.png` | \(C_D\), \(C_L\) vs \(t U/D\) |
-| `output/validation_report.json` | mean \(C_D\), Strouhal vs NASA targets |
-| `output/wake_tXXXX.XX.png` | speed + vorticity |
-| `output/cylinder_wake.gif` | animated wake |
-| `output/final_state.npz` | final staggered fields |
-| `demo/cylinder_wake.gif` | tracked demo copy |
+| `mesh_output/staggered_<tag>.npz` | cell / face locations and topology of the staggered mesh |
+| `mesh_output/mesh_<tag>.{png,vtk,msh}` | mesh picture and exports |
+| `output_ns/wake_<step>_t<time>.png` | velocity and vorticity plots per frame (`--out-dir` to choose another folder) |
+| `output_ns/cylinder_wake_<scheme>.gif` | animated wake |
+| `output_ns/forces_<scheme>_<preset>.png` | \(C_D\), \(C_L\) vs \(t U_\infty / D\) |
+| `output_ns/fields_<scheme>_<preset>.npz` | final fields and force history (input for `--restart` and `tools/compare_nasa.py`) |
+| `demo/` | tracked copies of GIF, plots, NASA comparison figures and the two PowerPoint decks |
 
-## Modules
+## Files
 
 | File | Role |
 |------|------|
-| `mesh.py` | 2-D MAC staggered box |
-| `cylinder.py` | immersed cylinder mask + surface band |
-| `piso.py` | laminar NS + PISO (no LES) |
-| `validate.py` | mean \(C_D\) + Strouhal from \(C_L\) peaks / FFT |
-| `viz.py` | wake plots + GIF |
-| `run.py` | driver / I/O |
+| `mesh_from_known_sizes.py` | mesher: sizes → O–H multiblock quads → checks → staggered extraction |
+| `ns_staggered_euler.py` | solver: topology, Euler predictor, γ convection, projection, forces, plots, GIF, CLI |
+| `tools/compare_nasa.py` | \(C_D\), \(C_L\), \(S_t\) of stored runs vs NASA Study #1, blockage extrapolation |
+| `tools/make_tutorial_deck.py`, `tools/make_12_steps_deck.py`, `tools/pptkit.py` | PowerPoint decks in `demo/` |
+| `THEORY_ns_staggered.md` | term-by-term discretisation of the equations as solved here |
+| `THEORY_12_steps.md` | the method as twelve short steps |
+| `VALIDATION_NASA.md` | comparison with NASA (two blockage ratios) |
 
 ## Method (short)
 
-- Incompressible 2-D Navier–Stokes, constant \(\nu = U D / \mathrm{Re}\)
-- MAC staggered grid; **central** convection by default (upwind optional — more dissipative)
-- Explicit momentum + Issa PISO pressure–velocity coupling (implicit Poisson)
-- Immersed-boundary cylinder (stair-stepped zero-velocity faces)
-- Forces from pressure on a thin fluid band; \(S_t\) from lift peak period
+- Incompressible 2-D Navier–Stokes, constant \(\nu = U_\infty D / \mathrm{Re}\).
+- Pressure and cell velocity at cell centres, normal velocity at face centres (MAC on quads).
+- Explicit Euler predictor; convection by the Griebel face blend
+  \(\phi_f = \tfrac12(\phi_o+\phi_n) - \tfrac12\gamma\,\mathrm{sign}(U_n)(\phi_n-\phi_o)\); central diffusion.
+- Chorin / Griebel projection: Neumann Poisson for p, then face-flux correction (max |div| ≈ 1e-11).
+- Forces by integrating pressure and wall shear on the cylinder faces; \(S_t\) from the lift signal.
 
-Central convection is important at Re = 150: first-order upwind on coarse grids adds enough numerical diffusion to suppress vortex shedding.
+Central convection matters at Re = 150: first-order upwind adds enough numerical
+diffusion to damp the shedding.
 
 ## References
 
 1. NASA GRC, *Laminar Flow over a Circular Cylinder: Study #1* (Wind-US validation).
 2. Roshko, A., *On the Development of Turbulent Wakes from Vortex Streets*, NACA Report 1191, 1954.
 3. Schlichting, H., *Boundary-Layer Theory*.
-4. Issa, R. I., *Solution of the implicitly discretised fluid flow equations by operator-splitting*, J. Comput. Phys., 1986.
+4. Griebel, M., Dornseifer, T., Neunhoeffer, T., *Numerical Simulation in Fluid Dynamics: A Practical Introduction*, SIAM, 1998.
