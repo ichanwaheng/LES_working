@@ -886,11 +886,55 @@ def frame_time(path: Path) -> float:
         return 0.0
 
 
+def save_wake_gif(
+    frame_paths: list[str | Path],
+    out_path: str | Path,
+    fps: int = 8,
+    max_width: int = 900,
+) -> Path:
+    """Assemble wake PNGs into an animated GIF with one shared palette."""
+    from PIL import Image
+
+    paths = [Path(p) for p in frame_paths if Path(p).is_file()]
+    if not paths:
+        raise ValueError("no wake frames to write into GIF")
+
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    rgb = []
+    for p in paths:
+        im = Image.open(p).convert("RGB")
+        if max_width and im.width > max_width:
+            h = int(im.height * max_width / im.width)
+            im = im.resize((max_width, h), Image.Resampling.LANCZOS)
+        rgb.append(im)
+
+    # quantise every frame against the first frame's palette so colours do
+    # not flicker between frames
+    palette_img = rgb[0].quantize(colors=256, method=Image.Quantize.MEDIANCUT)
+    frames = [palette_img] + [
+        im.quantize(colors=256, palette=palette_img) for im in rgb[1:]
+    ]
+    duration_ms = max(int(1000 / max(fps, 1)), 40)
+    frames[0].save(
+        out_path,
+        format="GIF",
+        save_all=True,
+        append_images=frames[1:],
+        duration=duration_ms,
+        loop=0,
+        optimize=False,
+        disposal=2,
+    )
+    for im in rgb:
+        im.close()
+    return out_path
+
+
 def build_gif(
     frames: list[Path], gif_path: Path, fps: int = 8, max_frames: int = 60
 ) -> tuple[Path, int]:
-    from viz import save_wake_gif
-
     # cap the frame count so a long run does not produce a 20 MB GIF
     if len(frames) > max_frames:
         idx = np.linspace(0, len(frames) - 1, max_frames).round().astype(int)
