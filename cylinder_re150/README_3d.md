@@ -32,6 +32,10 @@ python3 ns_staggered_euler_3d.py --fine --les --Re 3900 --nz 8 --poisson cg
 
 Outputs go to `output_ns3d/` (wake frames of the **mid-span** slice, GIF, forces,
 `fields_*.npz`). Mesh: `mesh_output/staggered_3d_<preset>_nz<nz>.npz`.
+`--demo` also copies the GIF to `demo/cylinder_wake_3d_smagorinsky.gif`.
+
+Tracked demo copy: `demo/cylinder_wake_3d_smagorinsky.gif` (smoke mesh, mid-span
+vorticity / velocity, Smagorinsky, 25 steps).
 
 ## Smagorinsky
 
