@@ -17,8 +17,8 @@ convention). Cell index `cid = k · Nc_2d + c`.
 ```bash
 cd cylinder_re150
 
-# smoke xy mesh × 4 spanwise cells, Smagorinsky, a few convective units
-python3 ns_staggered_euler_3d.py --quick --les --scheme central --nz 4 --steps 40
+# smoke xy mesh × 4 spanwise cells, Smagorinsky, to t U/D = 40
+python3 ns_staggered_euler_3d.py --quick --les --scheme central --nz 4 --demo
 
 # mesh only
 python3 mesh_from_known_sizes_3d.py --quick --nz 4 --Lz 3.1416
@@ -35,7 +35,8 @@ Outputs go to `output_ns3d/` (wake frames of the **mid-span** slice, GIF, forces
 `--demo` also copies the GIF to `demo/cylinder_wake_3d_smagorinsky.gif`.
 
 Tracked demo copy: `demo/cylinder_wake_3d_smagorinsky.gif` (smoke mesh, mid-span
-vorticity / velocity, Smagorinsky, 25 steps).
+vorticity / velocity, Smagorinsky, last 20 convective units of a run to
+`t U/D = 40`).
 
 ## Smagorinsky
 
