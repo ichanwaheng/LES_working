@@ -613,6 +613,41 @@ class GriebelStaggeredNS3D:
         vx, _, _ = self._grad(self.v)
         return vx - uy
 
+    def p_inf(self) -> float:
+        """Static pressure far upstream (mean of inlet-face owner cells)."""
+        m = self.topo["masks"]
+        if "inlet" not in m or not np.any(m["inlet"]):
+            return float(np.mean(self.p))
+        o = self.S["face_owner"][m["inlet"]]
+        return float(np.mean(self.p[np.unique(o)]))
+
+    def pressure_coefficient(self) -> np.ndarray:
+        """Cp = (p − p∞) / (½ ρ U∞²) at cell centres."""
+        q = 0.5 * self.rho * self.U_inf**2
+        return (self.p - self.p_inf()) / max(q, 1e-30)
+
+    def surface_cp(self, k: int | None = None) -> tuple[np.ndarray, np.ndarray]:
+        """Mid-span cylinder-surface Cp versus angle (θ = 0 at the nose)."""
+        S, m = self.S, self.topo["masks"]
+        if "cylinder" not in m:
+            return np.array([]), np.array([])
+        f = np.where(m["cylinder"])[0]
+        o = S["face_owner"][f]
+        Nc2, nz = S["n_cells_2d"], S["nz"]
+        if k is None:
+            k = nz // 2
+        k = int(np.clip(k, 0, nz - 1))
+        mid = (o // Nc2) == k
+        f, o = f[mid], o[mid]
+        if len(f) == 0:
+            return np.array([]), np.array([])
+        Fc = S["face_centers"][f]
+        q = 0.5 * self.rho * self.U_inf**2
+        Cp = (self.p[o] - self.p_inf()) / max(q, 1e-30)
+        theta = np.degrees(np.arctan2(Fc[:, 1] - S["yc"], S["xc"] - Fc[:, 0]))
+        order = np.argsort(theta)
+        return theta[order], Cp[order]
+
 
 def save_fields(path: Path, solver: GriebelStaggeredNS3D, hist: list) -> None:
     np.savez_compressed(
@@ -685,16 +720,28 @@ def save_wake_frame(path: Path, solver: GriebelStaggeredNS3D, vmax: float = 1.6)
     path.parent.mkdir(parents=True, exist_ok=True)
     wz = solver.slice_field(solver.vorticity_z())
     speed = solver.slice_field(np.sqrt(solver.u**2 + solver.v**2 + solver.w**2))
-    fig, (ax0, ax1) = plt.subplots(2, 1, figsize=(9.5, 7.6), sharex=True)
-    m0 = _draw_slice(ax0, solver, wz, vlim=3.0, cmap="RdBu_r")
-    ax0.set_title("Vorticity plot", loc="left", fontsize=11, fontweight="bold")
-    ax0.set_ylabel("y")
-    fig.colorbar(m0, ax=ax0, fraction=0.046, pad=0.02, label="vorticity")
-    m1 = _draw_slice(ax1, solver, speed, vlim=vmax, cmap="viridis", vmin=0.0)
-    ax1.set_title("Velocity plot", loc="left", fontsize=11, fontweight="bold")
-    ax1.set_xlabel("x")
-    ax1.set_ylabel("y")
-    fig.colorbar(m1, ax=ax1, fraction=0.046, pad=0.02, label="velocity")
+    p_sl = solver.slice_field(solver.p)
+    cp_sl = solver.slice_field(solver.pressure_coefficient())
+    p_vlim = max(float(np.percentile(np.abs(p_sl - solver.p_inf()), 98)), 1e-3)
+    cp_vlim = max(float(np.percentile(np.abs(cp_sl), 98)), 0.2)
+    fig, axes = plt.subplots(4, 1, figsize=(9.5, 14.4), sharex=True)
+    m0 = _draw_slice(axes[0], solver, wz, vlim=3.0, cmap="RdBu_r")
+    axes[0].set_title("Vorticity plot", loc="left", fontsize=11, fontweight="bold")
+    axes[0].set_ylabel("y")
+    fig.colorbar(m0, ax=axes[0], fraction=0.046, pad=0.02, label="vorticity")
+    m1 = _draw_slice(axes[1], solver, speed, vlim=vmax, cmap="viridis", vmin=0.0)
+    axes[1].set_title("Velocity plot", loc="left", fontsize=11, fontweight="bold")
+    axes[1].set_ylabel("y")
+    fig.colorbar(m1, ax=axes[1], fraction=0.046, pad=0.02, label="velocity")
+    m2 = _draw_slice(axes[2], solver, p_sl, vlim=p_vlim, cmap="RdBu_r")
+    axes[2].set_title("Static pressure plot", loc="left", fontsize=11, fontweight="bold")
+    axes[2].set_ylabel("y")
+    fig.colorbar(m2, ax=axes[2], fraction=0.046, pad=0.02, label="static pressure")
+    m3 = _draw_slice(axes[3], solver, cp_sl, vlim=cp_vlim, cmap="RdBu_r")
+    axes[3].set_title("Pressure coefficient plot", loc="left", fontsize=11, fontweight="bold")
+    axes[3].set_xlabel("x")
+    axes[3].set_ylabel("y")
+    fig.colorbar(m3, ax=axes[3], fraction=0.046, pad=0.02, label="pressure coefficient")
     fig.tight_layout()
     fig.savefig(path, dpi=100, bbox_inches="tight")
     plt.close(fig)
@@ -719,6 +766,40 @@ def plot_solution(path: Path, solver: GriebelStaggeredNS3D, hist: list) -> None:
     axes[1].set_ylabel("max |∇·U|")
     axes[1].set_title("Continuity residual", loc="left", fontsize=10)
     axes[1].grid(True, alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(path, dpi=130, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_pressure(path: Path, solver: GriebelStaggeredNS3D) -> None:
+    """Mid-span static pressure, Cp, and cylinder-surface Cp(θ)."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    p_sl = solver.slice_field(solver.p)
+    cp_sl = solver.slice_field(solver.pressure_coefficient())
+    p_vlim = max(float(np.percentile(np.abs(p_sl - solver.p_inf()), 98)), 1e-3)
+    cp_vlim = max(float(np.percentile(np.abs(cp_sl), 98)), 0.2)
+    fig, axes = plt.subplots(
+        3, 1, figsize=(9.5, 12.2), gridspec_kw={"height_ratios": [1, 1, 0.85]}
+    )
+    m0 = _draw_slice(axes[0], solver, p_sl, vlim=p_vlim, cmap="RdBu_r")
+    axes[0].set_title("Static pressure plot", loc="left", fontsize=11, fontweight="bold")
+    axes[0].set_ylabel("y")
+    fig.colorbar(m0, ax=axes[0], fraction=0.046, pad=0.02, label="static pressure")
+    m1 = _draw_slice(axes[1], solver, cp_sl, vlim=cp_vlim, cmap="RdBu_r")
+    axes[1].set_title("Pressure coefficient plot", loc="left", fontsize=11, fontweight="bold")
+    axes[1].set_xlabel("x")
+    axes[1].set_ylabel("y")
+    fig.colorbar(m1, ax=axes[1], fraction=0.046, pad=0.02, label="pressure coefficient")
+    th, Cp = solver.surface_cp()
+    axes[2].plot(th, Cp, color="#1f4e79", lw=1.4)
+    axes[2].axhline(0.0, color="0.5", lw=0.8)
+    axes[2].axvline(0.0, color="0.5", lw=0.8)
+    axes[2].set_xlim(-180.0, 180.0)
+    axes[2].set_xlabel(r"$\theta$ (deg, 0 at front stagnation)")
+    axes[2].set_ylabel("pressure coefficient")
+    axes[2].set_title("Pressure coefficient plot", loc="left", fontsize=11, fontweight="bold")
+    axes[2].grid(True, alpha=0.3)
     fig.tight_layout()
     fig.savefig(path, dpi=130, bbox_inches="tight")
     plt.close(fig)
@@ -927,12 +1008,20 @@ def main():
     fields = out / f"fields_{tag}.npz"
     plot = out / f"plot_{tag}.png"
     forces = out / f"forces_{tag}.png"
+    pressure = out / f"pressure_{tag}.png"
     save_fields(fields, solver, hist)
     plot_solution(plot, solver, hist)
+    plot_pressure(pressure, solver)
     fstat = plot_forces(forces, hist)
     print(f"wrote {fields}")
     print(f"wrote {plot}")
     print(f"wrote {forces}")
+    print(f"wrote {pressure}")
+    if args.demo:
+        demo_p = HERE / "demo" / "pressure_3d_smagorinsky.png"
+        demo_p.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(pressure, demo_p)
+        print(f"wrote {demo_p}")
     print(f"forces   : Cd_mean={fstat['Cd_mean']:.3f}  Cl_amp={fstat['Cl_amp']:.3f}")
 
     gif_path = None

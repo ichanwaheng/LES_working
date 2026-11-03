@@ -30,9 +30,11 @@ python3 ns_staggered_euler_3d.py --quick --no-les --scheme central --nz 4
 python3 ns_staggered_euler_3d.py --fine --les --Re 3900 --nz 8 --poisson cg
 ```
 
-Outputs go to `output_ns3d/` (wake frames of the **mid-span** slice, GIF, forces,
-`fields_*.npz`). Mesh: `mesh_output/staggered_3d_<preset>_nz<nz>.npz`.
-`--demo` also copies the GIF to `demo/cylinder_wake_3d_smagorinsky.gif`.
+Outputs go to `output_ns3d/` (mid-span wake frames with vorticity, velocity,
+static pressure and Cp; `pressure_*.png` with surface \(C_p(\theta)\); GIF;
+forces; `fields_*.npz`). Mesh: `mesh_output/staggered_3d_<preset>_nz<nz>.npz`.
+`--demo` also copies the GIF to `demo/cylinder_wake_3d_smagorinsky.gif` and the
+pressure figure to `demo/pressure_3d_smagorinsky.png`.
 
 Tracked demo copy: `demo/cylinder_wake_3d_smagorinsky.gif` (smoke mesh, mid-span
 vorticity / velocity, Smagorinsky, last 20 convective units of a run to
