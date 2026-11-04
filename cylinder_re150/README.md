@@ -45,6 +45,10 @@ python3 ns_staggered_euler.py --quick --scheme donor --steps 80 --demo
 python3 ns_staggered_euler.py --fine --scheme central --t-end 240 \
         --restart output_ns/fields_central_fine.npz
 
+# solver only (load mesh, time-step, write fields_*.npz — no plots)
+python3 ns_solver_2d.py --quick --scheme donor --steps 80
+python3 ns_solver_2d.py --fine --scheme central --t-end 120
+
 # mesh only (prints the sizing report and all PASS/FAIL checks)
 python3 mesh_from_known_sizes.py
 
@@ -52,7 +56,7 @@ python3 mesh_from_known_sizes.py
 python3 tools/compare_nasa.py
 ```
 
-Important flags of `ns_staggered_euler.py`:
+Important flags of `ns_staggered_euler.py` (shared by `ns_solver_2d.py` except the plot / GIF / `--demo` options):
 
 | Flag | Meaning |
 |------|---------|
@@ -84,7 +88,8 @@ Important flags of `ns_staggered_euler.py`:
 | File | Role |
 |------|------|
 | `mesh_from_known_sizes.py` | mesher: sizes → O–H multiblock quads → checks → staggered extraction |
-| `ns_staggered_euler.py` | solver: topology, Euler predictor, γ convection, projection, forces, plots, GIF, CLI |
+| `ns_solver_2d.py` | 2-D solver only: load mesh, time-step, write `fields_*.npz` (no plots) |
+| `ns_staggered_euler.py` | same solver plus wake frames, pressure plots, GIF, CLI |
 | `tools/compare_nasa.py` | \(C_D\), \(C_L\), \(S_t\) of stored runs vs NASA Study #1, blockage extrapolation |
 | `tools/make_tutorial_deck.py`, `tools/make_12_steps_deck.py`, `tools/pptkit.py` | PowerPoint decks in `demo/` |
 | `THEORY_ns_staggered.md` | term-by-term discretisation of the equations as solved here |
