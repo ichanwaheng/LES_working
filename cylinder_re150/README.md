@@ -64,7 +64,7 @@ Important flags of `ns_staggered_euler.py`:
 | `--perturb` | amplitude of the near-wake seed that triggers shedding (0 = off) |
 | `--frame-every`, `--gif-fps`, `--gif-from`, `--no-gif` | frame and GIF output |
 | `--restart` | continue from a `fields_*.npz` |
-| `--demo` | copy GIF / force plot / final frame into `demo/` |
+| `--demo` | copy GIF / force plot / pressure figure / final frame into `demo/` |
 
 ## Outputs
 
@@ -72,7 +72,8 @@ Important flags of `ns_staggered_euler.py`:
 |------|---------|
 | `mesh_output/staggered_<tag>.npz` | cell / face locations and topology of the staggered mesh |
 | `mesh_output/mesh_<tag>.{png,vtk,msh}` | mesh picture and exports |
-| `output_ns/wake_<step>_t<time>.png` | velocity and vorticity plots per frame (`--out-dir` to choose another folder) |
+| `output_ns/wake_<step>_t<time>.png` | vorticity, velocity, static pressure and Cp plots per frame |
+| `output_ns/pressure_<scheme>_<preset>.png` | static pressure field, Cp field, and cylinder-surface \(C_p(\theta)\) |
 | `output_ns/cylinder_wake_<scheme>.gif` | animated wake |
 | `output_ns/forces_<scheme>_<preset>.png` | \(C_D\), \(C_L\) vs \(t U_\infty / D\) |
 | `output_ns/fields_<scheme>_<preset>.npz` | final fields and force history (input for `--restart` and `tools/compare_nasa.py`) |
