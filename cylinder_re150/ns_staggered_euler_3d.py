@@ -724,6 +724,14 @@ def plot_solution(path: Path, solver: GriebelStaggeredNS3D, hist: list) -> None:
     plt.close(fig)
 
 
+def frame_time(path: Path) -> float:
+    """Parse t from ``wake_{k:05d}_t{t:08.4f}.png``."""
+    try:
+        return float(path.stem.split("_t")[-1])
+    except ValueError:
+        return 0.0
+
+
 def save_wake_gif(frame_paths, out_path, fps=8, max_width=900) -> Path:
     from PIL import Image
 
@@ -837,9 +845,9 @@ def main():
     every = max(int(args.frame_every), 1)
     if args.quick:
         if t_end is None:
-            t_end = 4.0
+            t_end = 40.0
         if args.steps == 50:
-            n_steps = 400
+            n_steps = 5000
         if args.frame_every == 2:
             every = 8
     elif args.fine:
@@ -934,6 +942,11 @@ def main():
             if f not in seen:
                 uniq.append(f)
                 seen.add(f)
+        if t_end is not None and t_end > 20.0:
+            t0_gif = t_end - 20.0
+            later = [f for f in uniq if frame_time(f) >= t0_gif]
+            if later:
+                uniq = later
         gif_path = out / f"cylinder_wake_3d_{solver.scheme}.gif"
         _, n_used = build_gif(
             uniq, gif_path, fps=int(args.gif_fps), max_frames=int(args.gif_max_frames)
