@@ -42,6 +42,10 @@ python3 run.py --no-gif
 python3 make_gif.py
 python3 make_gif.py --out-dir output --fps 8 --every 2 --demo
 python3 make_gif.py --run-quick --demo
+
+# Griebel staggered solver only (load mesh, time-step, write fields_*.npz — no plots)
+python3 ns_solver_2d.py --quick --scheme donor --steps 80
+python3 ns_solver_2d.py --fine --scheme central --t-end 120
 ```
 
 Config: `config.yaml` (`physical`, `domain`, `mesh`, `time`, `solver`, `validation`, `quick`).
@@ -67,6 +71,7 @@ Cell counts `nx`, `ny` are **computed**. See `mesh_sizing.py` and `python3 plot_
 | `output/cylinder_wake.gif` | animated wake |
 | `output/final_state.npz` | final staggered fields |
 | `demo/cylinder_wake.gif` | tracked demo copy |
+| `output_ns/fields_<scheme>_<preset>.npz` | Griebel solver-only fields from `ns_solver_2d.py` |
 
 ## Modules
 
@@ -78,6 +83,8 @@ Cell counts `nx`, `ny` are **computed**. See `mesh_sizing.py` and `python3 plot_
 | `validate.py` | mean \(C_D\) + Strouhal from \(C_L\) peaks / FFT |
 | `viz.py` | wake plots + GIF |
 | `run.py` | driver / I/O |
+| `ns_solver_2d.py` | Griebel staggered NS: load mesh, time-step, write `fields_*.npz` (no plots) |
+| `ns_staggered_euler.py` | same Griebel solver plus wake frames, GIF, and plots |
 
 ## Method (short)
 
